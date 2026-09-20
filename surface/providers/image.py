@@ -147,6 +147,12 @@ class MockImageProvider(Provider):
         if job is None:
             return {}
 
+        # Cost formula: a small fixed per-image base rate ($0.02) scaled by
+        # the number of polls the job took to complete (job["target"]), so
+        # longer/heavier simulated jobs report a higher (still deterministic)
+        # actual cost. E.g. target=3 -> $0.06.
+        actual_cost = round(0.02 * job.get("target", 1), 4)
+
         return {
             "content_ref": f"media/image_{provider_job_id}.png",
             "content_type": "image/png",
@@ -155,4 +161,5 @@ class MockImageProvider(Provider):
                 "prompt": job.get("request", {}).get("prompt", ""),
                 "seed": 42,
             },
+            "actual_cost": actual_cost,
         }

@@ -141,13 +141,21 @@ class MockVideoProvider(Provider):
         if job is None:
             return {}
 
+        # Cost formula: a flat per-second video rate ($0.10/sec of requested
+        # duration, default 5s if unspecified) so cost tracks the size of the
+        # generated asset rather than how many polls the mock simulation
+        # happened to take. E.g. duration=5 -> $0.50.
+        duration = job.get("request", {}).get("duration", 5)
+        actual_cost = round(0.10 * duration, 4)
+
         return {
             "content_ref": f"media/video_{provider_job_id}.mp4",
             "content_type": "video/mp4",
             "metadata": {
                 "job_id": provider_job_id,
                 "prompt": job.get("request", {}).get("prompt", ""),
-                "duration": job.get("request", {}).get("duration", 5),
+                "duration": duration,
                 "seed": 123,
             },
+            "actual_cost": actual_cost,
         }

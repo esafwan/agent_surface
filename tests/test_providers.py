@@ -95,6 +95,21 @@ class TestMockImageProvider:
         assert result["content_type"] == "image/png"
         assert result["metadata"]["prompt"] == "A sunset"
 
+    def test_collect_returns_actual_cost(self):
+        """Collect should report a deterministic actual_cost.
+
+        Formula: $0.02 * polls_to_success target.
+        """
+        provider = MockImageProvider(polls_to_success=3)
+        job_id = provider.submit({"prompt": "A sunset"})
+        result = provider.collect(job_id)
+        assert result["actual_cost"] == pytest.approx(0.06)
+
+        provider2 = MockImageProvider(polls_to_success=1)
+        job_id2 = provider2.submit({"prompt": "x"})
+        result2 = provider2.collect(job_id2)
+        assert result2["actual_cost"] == pytest.approx(0.02)
+
     def test_unknown_job_returns_failed(self):
         """Status for unknown job should return "failed"."""
         provider = MockImageProvider()
@@ -193,6 +208,21 @@ class TestMockVideoProvider:
         assert metadata["prompt"] == "Dancing robot"
         assert metadata["duration"] == 8
         assert "seed" in metadata
+
+    def test_collect_returns_actual_cost(self):
+        """Collect should report a deterministic actual_cost.
+
+        Formula: $0.10 * requested duration (seconds).
+        """
+        provider = MockVideoProvider()
+        job_id = provider.submit({"prompt": "A cat", "duration": 5})
+        result = provider.collect(job_id)
+        assert result["actual_cost"] == pytest.approx(0.5)
+
+        provider2 = MockVideoProvider()
+        job_id2 = provider2.submit({"prompt": "A cat", "duration": 10})
+        result2 = provider2.collect(job_id2)
+        assert result2["actual_cost"] == pytest.approx(1.0)
 
     def test_multiple_jobs_isolation(self):
         """Video jobs should be independent."""

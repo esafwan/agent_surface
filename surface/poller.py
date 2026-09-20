@@ -15,6 +15,41 @@ from surface.store import Store
 logger = logging.getLogger(__name__)
 
 
+def get_project_cost_summary(store: Store) -> Dict[str, float]:
+    """Sum estimated and actual provider cost across ALL jobs in the store.
+
+    Per SPEC section 39 ("Runtime SHOULD track estimated/actual provider
+    cost where available"), this makes accumulated spend queryable, not
+    just recorded on individual job rows. Mirrors the small summation
+    pattern used by `worker.py`'s `_sum_job_costs` budget helper, but is
+    intentionally duplicated here (not imported) so `poller.py` and
+    `worker.py` stay independently owned modules this round.
+
+    Includes jobs in every status (queued/running/succeeded/failed/
+    cancelled) since `cost_estimate` may be set at creation time regardless
+    of outcome, and `cost_actual` is only ever set on success. Callers that
+    want budget-style "only running spend" semantics should filter jobs
+    themselves (see `worker.py::_sum_job_costs` for that variant).
+
+    Args:
+        store: Store instance to scan.
+
+    Returns:
+        Dict with "cost_estimate_total" and "cost_actual_total" (floats).
+    """
+    statuses = ("queued", "running", "succeeded", "failed", "cancelled")
+    estimate_total = 0.0
+    actual_total = 0.0
+    for status in statuses:
+        for job in store.list_jobs_by_status(status):
+            estimate_total += float(job.get("cost_estimate") or 0.0)
+            actual_total += float(job.get("cost_actual") or 0.0)
+    return {
+        "cost_estimate_total": estimate_total,
+        "cost_actual_total": actual_total,
+    }
+
+
 class Poller:
     """Async job poller and completion handler.
 
@@ -119,30 +154,8 @@ class Poller:
             try:
                 status = provider.status(provider_job_id)
                 logger.debug(f"Job {job_id} (provider: {provider_job_id}) status: {status}")
-
-                if status == "succeeded":
-                    # Collect result
-                    self._handle_job_success(job_id, artifact_id, provider, provider_job_id)
-                    jobs_processed += 1
-
-                elif status == "failed":
-                    self._handle_job_failure(job_id, artifact_id, "Provider returned failed", "job_failed")
-                    jobs_processed += 1
-
-                elif status == "cancelled":
-                    # Job was cancelled by provider or user
-                    self.store.update_job_status(job_id, "cancelled")
-                    logger.info(f"Job {job_id} cancelled at provider")
-                    jobs_processed += 1
-
-                elif status in ("queued", "running"):
-                    # Still in progress, continue polling
-                    logger.debug(f"Job {job_id} still {status}, will poll again")
-                    jobs_processed += 1
-
-                else:
-                    logger.warning(f"Unknown status {status} for job {job_id}")
-                    jobs_processed += 1
+                self.apply_status(job_id, artifact_id, provider, provider_job_id, status)
+                jobs_processed += 1
 
             except Exception as e:
                 logger.error(f"Error polling job {job_id}: {e}")
@@ -150,6 +163,46 @@ class Poller:
                 jobs_processed += 1
 
         return jobs_processed
+
+    def apply_status(
+        self,
+        job_id: str,
+        artifact_id: str,
+        provider: Provider,
+        provider_job_id: str,
+        status: str,
+    ) -> None:
+        """Apply a provider-reported status to a job, using the same
+        completion policy regardless of how the status was learned (a
+        poller's own `provider.status()` call, or a provider-pushed webhook
+        event carrying a terminal status). Shared by `poll_once()` and
+        `surface.webhook.handle_webhook_payload()` — see that module's
+        docstring for the design rationale.
+
+        Args:
+            job_id: Store job ID.
+            artifact_id: Artifact being generated.
+            provider: Provider instance for this job.
+            provider_job_id: Provider's job ID.
+            status: One of "succeeded", "failed", "cancelled", "queued", "running".
+        """
+        if status == "succeeded":
+            self._handle_job_success(job_id, artifact_id, provider, provider_job_id)
+
+        elif status == "failed":
+            self._handle_job_failure(job_id, artifact_id, "Provider returned failed", "job_failed")
+
+        elif status == "cancelled":
+            # Job was cancelled by provider or user
+            self.store.update_job_status(job_id, "cancelled")
+            logger.info(f"Job {job_id} cancelled at provider")
+
+        elif status in ("queued", "running"):
+            # Still in progress, nothing to do yet.
+            logger.debug(f"Job {job_id} still {status}, will check again later")
+
+        else:
+            logger.warning(f"Unknown status {status} for job {job_id}")
 
     def _handle_job_success(self, job_id: str, artifact_id: str, provider: Provider, provider_job_id: str) -> None:
         """Handle successful job completion.
@@ -175,6 +228,11 @@ class Poller:
             content_ref = result.get("content_ref")
             content_type = result.get("content_type", "text/plain")
             metadata = result.get("metadata", {})
+            # SPEC section 39: track actual provider cost where available.
+            # Providers report this via an "actual_cost" key on collect()'s
+            # result; not all providers will have one, so default to None
+            # and only pass cost_actual through to the store when present.
+            actual_cost = result.get("actual_cost")
 
             # Create new artifact version with result. Use the job_id as the
             # idempotency key: job_id is stable and unique per job, so a
@@ -196,7 +254,8 @@ class Poller:
             # into "review" so a human can act on it (SPEC section 11).
             self.store.set_status(artifact_id, "review")
 
-            # Update job status to succeeded with result
+            # Update job status to succeeded with result, recording actual
+            # cost (SPEC section 39) when the provider reported one.
             self.store.update_job_status(
                 job_id,
                 "succeeded",
@@ -206,6 +265,7 @@ class Poller:
                     "version_id": version_result.get("version_id"),
                     "metadata": metadata,
                 },
+                cost_actual=actual_cost,
             )
 
             # Emit job_done event

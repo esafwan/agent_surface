@@ -1,7 +1,7 @@
 """Unit tests for the async job poller."""
 
 import pytest
-from surface.poller import Poller
+from surface.poller import Poller, get_project_cost_summary
 from surface.providers.image import MockImageProvider
 from surface.providers.video import MockVideoProvider
 from surface.store import Store
@@ -193,6 +193,61 @@ class TestPollerBasicFlow:
             "SELECT * FROM events WHERE type='job_failed'",
         ).fetchall()
         assert len(events) == 1
+
+
+class TestPollerCostAccounting:
+    """SPEC section 39: track estimated/actual provider cost."""
+
+    def test_success_records_cost_actual(self):
+        """On success, poller should read actual_cost from provider.collect()
+        and persist it via update_job_status(cost_actual=...)."""
+        store = Store(":memory:")
+        store.create_artifact(id="img_1", stage="keyframes", title="Image")
+
+        provider = MockImageProvider(polls_to_success=1)
+        job = store.create_job(
+            artifact_id="img_1",
+            provider="image",
+            kind="image",
+            request={"prompt": "A sunset"},
+            cost_estimate=0.5,
+        )
+
+        poller = Poller(store, {"image": provider})
+        poller.poll_once()  # submit
+        poller.poll_once()  # status: queued -> running
+        poller.poll_once()  # status: running -> succeeded
+
+        job_after = store.get_job(job["id"])
+        assert job_after["status"] == "succeeded"
+        assert job_after["cost_actual"] == pytest.approx(0.02)
+        assert job_after["cost_estimate"] == pytest.approx(0.5)
+
+    def test_cost_summary_sums_estimate_and_actual(self):
+        """get_project_cost_summary should sum cost_estimate/cost_actual
+        across all jobs in the store."""
+        store = Store(":memory:")
+        store.create_artifact(id="img_1", stage="keyframes", title="Image 1")
+        store.create_artifact(id="img_2", stage="keyframes", title="Image 2")
+
+        provider = MockImageProvider(polls_to_success=1)
+        store.create_job(
+            artifact_id="img_1", provider="image", kind="image",
+            request={"prompt": "a"}, cost_estimate=0.5,
+        )
+        store.create_job(
+            artifact_id="img_2", provider="image", kind="image",
+            request={"prompt": "b"}, cost_estimate=1.0,
+        )
+
+        poller = Poller(store, {"image": provider})
+        poller.poll_once()  # submit both
+        poller.poll_once()  # status: queued -> running for both
+        poller.poll_once()  # status: running -> succeeded for both
+
+        summary = get_project_cost_summary(store)
+        assert summary["cost_estimate_total"] == pytest.approx(1.5)
+        assert summary["cost_actual_total"] == pytest.approx(0.04)
 
 
 class TestPollerCancellation:
