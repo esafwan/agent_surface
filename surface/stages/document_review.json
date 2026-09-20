@@ -1,0 +1,27 @@
+{
+  "schema_version": "1",
+  "id": "document_review",
+  "title": "Document Review Pipeline",
+  "stages": [
+    {
+      "id": "sections",
+      "artifact_type": "text",
+      "allowed_actions": ["edit", "revise", "approve"],
+      "approval_required": true
+    },
+    {
+      "id": "findings",
+      "artifact_type": "text",
+      "depends_on": ["sections"],
+      "allowed_actions": ["regenerate", "revise", "select_version", "approve", "cancel"],
+      "approval_required": true,
+      "generation": {
+        "provider": "analysis",
+        "max_parallel": 2
+      }
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["sections", "findings"]
+  }
+}

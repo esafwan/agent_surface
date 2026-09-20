@@ -1,0 +1,38 @@
+{
+  "schema_version": "1",
+  "id": "generic_media_pipeline",
+  "title": "Generic Media Pipeline",
+  "stages": [
+    {
+      "id": "prompts",
+      "artifact_type": "text",
+      "allowed_actions": ["edit", "revise", "approve"],
+      "approval_required": true
+    },
+    {
+      "id": "images",
+      "artifact_type": "image",
+      "depends_on": ["prompts"],
+      "allowed_actions": ["regenerate", "revise", "select_version", "approve", "cancel"],
+      "approval_required": true,
+      "generation": {
+        "provider": "image_default",
+        "max_parallel": 4
+      }
+    },
+    {
+      "id": "videos",
+      "artifact_type": "video",
+      "depends_on": ["images"],
+      "allowed_actions": ["regenerate", "revise", "select_version", "approve", "cancel"],
+      "approval_required": true,
+      "generation": {
+        "provider": "video_default",
+        "max_parallel": 2
+      }
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["prompts", "images", "videos"]
+  }
+}

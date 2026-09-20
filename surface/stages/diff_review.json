@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "id": "diff_review",
+  "title": "Diff Review Pipeline",
+  "stages": [
+    {
+      "id": "changes",
+      "artifact_type": "diff",
+      "allowed_actions": ["approve", "reopen", "message"],
+      "approval_required": true
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["changes"]
+  }
+}

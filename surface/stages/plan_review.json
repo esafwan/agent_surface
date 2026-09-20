@@ -1,0 +1,37 @@
+{
+  "schema_version": "1",
+  "id": "plan_review",
+  "title": "Plan Review Pipeline",
+  "stages": [
+    {
+      "id": "draft",
+      "artifact_type": "text",
+      "allowed_actions": ["edit", "revise", "approve"],
+      "approval_required": true
+    },
+    {
+      "id": "sections",
+      "artifact_type": "text",
+      "depends_on": ["draft"],
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true
+    },
+    {
+      "id": "risks",
+      "artifact_type": "text",
+      "depends_on": ["sections"],
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true
+    },
+    {
+      "id": "final",
+      "artifact_type": "text",
+      "depends_on": ["risks", "sections"],
+      "allowed_actions": ["revise", "approve", "reopen", "message"],
+      "approval_required": true
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["draft", "sections", "risks", "final"]
+  }
+}
