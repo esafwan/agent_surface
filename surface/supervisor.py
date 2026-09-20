@@ -75,6 +75,7 @@ class Supervisor:
         transport: Any,
         stage_config: StageConfig,
         config: Optional[SupervisorConfig] = None,
+        project_id: str = "default",
     ):
         """
         Initialize Supervisor.
@@ -84,6 +85,7 @@ class Supervisor:
             transport: WorkerTransport implementation (NativeStream or Resume).
             stage_config: StageConfig instance defining stages/actions/dependencies.
             config: SupervisorConfig (or None for defaults).
+            project_id: Identifier for the project this supervisor drives.
         """
         self.store = store
         self.transport = transport
@@ -91,8 +93,9 @@ class Supervisor:
         self.config = config or SupervisorConfig()
 
         self.worker_session = None
-        self.project_id = "default"  # TODO: parameterize
+        self.project_id = project_id
         self.event_count = 0
+        self._last_session_ref: Optional[str] = None
 
     def start_worker(self, project_context: Optional[Dict[str, Any]] = None) -> bool:
         """
@@ -112,7 +115,16 @@ class Supervisor:
                 "project_id": self.project_id,
                 "stage_config": self.stage_config.raw,
             }
-            self.worker_session = self.transport.start(context)
+            if self._last_session_ref is not None:
+                # Per SPEC section 21/23: prefer resuming a prior session over a
+                # cold start so a recycled/restarted supervisor rehydrates rather
+                # than losing worker continuity.
+                self.worker_session = self.transport.resume(
+                    self._last_session_ref, context
+                )
+            else:
+                self.worker_session = self.transport.start(context)
+            self._last_session_ref = self.worker_session.session_id
             logger.info(f"Worker started: {self.worker_session.session_id}")
             return True
         except Exception as e:
@@ -211,10 +223,13 @@ class Supervisor:
                 d["downstream_artifact_id"] for d in graph["downstreams"]
             ]
 
-            # Include upstream artifacts for context
+            # Include upstream artifacts for context, filtering out any ids that
+            # no longer resolve (e.g. deleted between graph read and lookup).
             context["upstream_artifacts"] = [
-                self.store.get_artifact(uid)
-                for uid in context["upstream_ids"]
+                a for a in (
+                    self.store.get_artifact(uid)
+                    for uid in context["upstream_ids"]
+                ) if a is not None
             ]
 
         return context

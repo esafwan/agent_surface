@@ -153,6 +153,9 @@ class Poller:
         try:
             # Verify job was not cancelled
             job = self.store.get_job(job_id)
+            if job is None:
+                logger.warning(f"Job {job_id} not found, skipping success handling")
+                return
             if job["cancel_requested"] or job["status"] == "cancelled":
                 logger.info(f"Job {job_id} was cancelled, ignoring late success")
                 return

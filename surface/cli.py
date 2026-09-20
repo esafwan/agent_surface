@@ -10,6 +10,7 @@ Per SPEC section 17 (Store/Inbox Tools CLI) and section 9 (Runtime Directory).
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -376,9 +377,17 @@ class SurfaceCLI:
             self._error(f"Project already exists at {self.db_path}")
             return
 
-        # Load stage config
-        stages_dir = Path(__file__).parent / "stages"
-        config_file = stages_dir / f"{stage}.json"
+        # Load stage config. Constrain the stage name to a safe identifier so
+        # it cannot be used to escape the stages directory (SPEC section 37).
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", stage):
+            self._error(f"Invalid stage name: {stage}")
+            return
+
+        stages_dir = (Path(__file__).parent / "stages").resolve()
+        config_file = (stages_dir / f"{stage}.json").resolve()
+        if stages_dir not in config_file.parents:
+            self._error(f"Invalid stage name: {stage}")
+            return
 
         if not config_file.exists():
             self._error(f"Stage config '{stage}' not found at {config_file}")
