@@ -606,6 +606,19 @@ class Store:
 
         return self.get_job(job_id)
 
+    def list_jobs_by_status(self, status: str) -> List[Dict[str, Any]]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM jobs WHERE status = ?", (status,))
+        rows = cursor.fetchall()
+        results = []
+        for row in rows:
+            res = dict(row)
+            res["cancel_requested"] = bool(res["cancel_requested"])
+            res["request"] = json.loads(res["request_json"]) if res.get("request_json") else {}
+            res["result"] = json.loads(res["result_json"]) if res.get("result_json") else {}
+            results.append(res)
+        return results
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
