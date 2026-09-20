@@ -613,6 +613,42 @@ def render_version_content(version_row: VersionDisplayRow) -> Tuple[str, Optiona
         return ("text", f"[{content_type}] {version_row.content_ref or version_row.content}")
 
 
+def schema_properties(form_schema: Optional[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Return (field_name, field_schema) pairs from a JSON Schema object's
+    `properties`, preserving declaration order (dicts are insertion-ordered).
+
+    Returns an empty list for a missing/malformed schema rather than raising
+    — a stage without a usable form_schema simply renders no form fields.
+    """
+    if not isinstance(form_schema, dict):
+        return []
+    props = form_schema.get("properties")
+    if not isinstance(props, dict):
+        return []
+    return list(props.items())
+
+
+def parse_form_answers(content: Optional[str]) -> Dict[str, Any]:
+    """Best-effort parse of a form artifact's stored JSON content into a
+    dict of current answers, used to pre-fill form fields. Returns {} for
+    missing/invalid/non-object content rather than raising, since this
+    drives display defaults, not validation."""
+    if not content:
+        return {}
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def build_form_answers_json(field_names: List[str], field_values: List[Any]) -> str:
+    """Reassemble submitted form field values (in the same order as
+    field_names) into a JSON object string, for storing as a form
+    artifact's version content."""
+    return json.dumps(dict(zip(field_names, field_values)))
+
+
 def describe_select_version_conflict(result: Dict[str, Any]) -> Optional[str]:
     """
     Build a user-facing conflict message for a select_version result.
@@ -646,12 +682,47 @@ def describe_select_version_conflict(result: Dict[str, Any]) -> Optional[str]:
 
 
 BOARD_CSS = """
-/* --- Agent Surface board: tighten Gradio's defaults into a review tool --- */
+/* --- Agent Surface board: tighten Gradio's defaults into a review tool ---
+ *
+ * Grounded in Gradio 5.50's real DOM and theme:
+ *   - the outer wrapper is  div.gradio-container.gradio-container-5-50-0-dev0
+ *   - the inner wrapper is  main.fillable.app.svelte-<hash>, which Gradio caps
+ *     at breakpoint widths (640/768/1024/1280/1536/1920px) via
+ *     `.fillable.svelte-x.svelte-x:not(.fill_width)` — specificity (0,3,1),
+ *     higher than a bare `.gradio-container`, so the inner cap must be
+ *     overridden separately or it silently keeps the column narrow.
+ *   - every var(--*) below is a real token emitted by
+ *     gradio.themes.Soft()._get_theme_css() (or Gradio's own --size-* scale).
+ */
 
+/* Local scale tokens, layered on top of the theme's own variables. */
 .gradio-container {
-  max-width: 1080px !important;
+  --surface-max-width: 1600px;
+  --surface-gutter: 2vw;
+  --surface-radius: var(--radius-lg);
+  --surface-rhythm: 12px;
+}
+
+/* Width: fill a real desktop viewport instead of a phone-width column.
+ * Gradio's own container rule (…-5-50-0-dev0) sets display:flex with no
+ * width, so as a flex item centered by its parent it shrinks to its
+ * content's width no matter how large max-width is -- width:100% is what
+ * actually makes it grow to fill up to that cap. Verified: without this,
+ * a 1920px viewport rendered a ~514px-wide container even with
+ * max-width:1600px in effect. */
+.gradio-container {
+  width: 100% !important;
+  max-width: min(96vw, var(--surface-max-width)) !important;
   margin: 0 auto !important;
-  font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font);
+}
+/* Gradio's own inner cap (see note above) would still pin content to the
+ * breakpoint ladder; release it so the container rule is the only limit. */
+.gradio-container main.fillable,
+.gradio-container main.fillable:not(.fill_width) {
+  max-width: 100% !important;
+  padding-left: var(--surface-gutter) !important;
+  padding-right: var(--surface-gutter) !important;
 }
 
 /* Gradio stacks generous gaps everywhere; pull them in globally. */
@@ -662,89 +733,138 @@ BOARD_CSS = """
 #board-header {
   align-items: center;
   border-bottom: 1px solid var(--border-color-primary);
-  padding: 4px 0 10px 0;
-  margin-bottom: 4px;
+  padding: 2px 0 12px 0;
+  margin-bottom: 8px;
+  gap: var(--surface-rhythm) !important;
 }
 #board-header .prose h1,
 #board-header .prose h2 { margin: 0 !important; }
 .board-title p, .board-title h1, .board-title h2 {
   margin: 0 !important;
-  font-size: 17px !important;
+  font-size: calc(var(--text-lg) + 2px) !important;
   font-weight: 650 !important;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
+  color: var(--body-text-color);
 }
 .board-status p {
   margin: 0 !important;
   text-align: right;
-  font-size: 12.5px !important;
+  font-size: var(--text-sm) !important;
   color: var(--body-text-color-subdued);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tabs: Gradio's tab strip is the primary navigation, so give it presence.
+ * Real classes from Gradio 5.50's Tabs bundle: .tabs / .tab-wrapper /
+ * .tab-container / button.selected. */
+.gradio-container .tabs { gap: var(--surface-rhythm) !important; }
+.gradio-container .tab-wrapper { margin-bottom: 4px !important; }
+.gradio-container .tab-container button {
+  font-size: var(--text-md) !important;
+  letter-spacing: -0.005em;
+}
+.gradio-container .tab-container button.selected {
+  color: var(--color-accent) !important;
+  font-weight: 650 !important;
 }
 
 /* Artifact card: one light container per artifact, not per field. */
 .artifact-card {
   border: 1px solid var(--border-color-primary) !important;
-  border-radius: 10px !important;
-  padding: 14px 16px 12px 16px !important;
-  margin-bottom: 14px !important;
+  border-radius: var(--surface-radius) !important;
+  padding: 16px 18px 14px 18px !important;
+  margin-bottom: 16px !important;
   background: var(--background-fill-primary) !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-drop);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.artifact-card:hover {
+  border-color: var(--border-color-accent-subdued) !important;
+  box-shadow: var(--shadow-drop-lg);
 }
 .artifact-title p, .artifact-title h3 {
   margin: 0 0 2px 0 !important;
-  font-size: 15.5px !important;
+  font-size: var(--text-lg) !important;
   font-weight: 650 !important;
   line-height: 1.3;
+  letter-spacing: -0.012em;
+  color: var(--body-text-color);
 }
 /* The metadata line: small, single row, never its own boxed section. */
 .artifact-meta p {
-  margin: 0 0 10px 0 !important;
-  font-size: 12px !important;
+  margin: 0 0 var(--surface-rhythm) 0 !important;
+  font-size: var(--text-sm) !important;
   color: var(--body-text-color-subdued);
-  line-height: 1.5;
+  line-height: 1.6;
+  letter-spacing: 0.005em;
 }
 .artifact-meta strong { font-weight: 600; color: var(--body-text-color); }
 
 /* The review surface itself: the thing the page exists for. */
 .content-surface textarea {
-  font-size: 15px !important;
-  line-height: 1.6 !important;
-  border: none !important;
+  font-size: calc(var(--text-md) + 1px) !important;
+  line-height: 1.65 !important;
+  border: 1px solid var(--border-color-primary) !important;
   box-shadow: none !important;
   background: var(--background-fill-secondary) !important;
-  padding: 12px 14px !important;
-  border-radius: 8px !important;
+  color: var(--body-text-color) !important;
+  padding: 14px 16px !important;
+  border-radius: var(--radius-md) !important;
   resize: vertical;
 }
 .content-surface .prose {
-  font-size: 15px !important;
-  line-height: 1.6 !important;
-  padding: 12px 14px !important;
+  font-size: calc(var(--text-md) + 1px) !important;
+  line-height: 1.65 !important;
+  padding: 14px 16px !important;
   background: var(--background-fill-secondary);
-  border-radius: 8px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: var(--radius-md);
 }
-.content-surface { margin-bottom: 8px !important; }
+.content-surface img,
+.content-surface video {
+  border-radius: var(--radius-md) !important;
+}
+.content-surface { margin-bottom: var(--surface-rhythm) !important; }
+
+/* Accordions (prompt/notes, version history) read as secondary detail. */
+.artifact-card .label-wrap {
+  font-size: var(--text-sm) !important;
+  color: var(--body-text-color-subdued) !important;
+  font-weight: 600 !important;
+}
 
 /* Version history rows: a compact list, one line each. */
-.version-row { align-items: center !important; margin: 0 !important; }
+.version-row {
+  align-items: center !important;
+  margin: 0 !important;
+  padding: 3px 0 !important;
+}
 .version-line p {
   margin: 0 !important;
-  font-size: 12.5px !important;
+  font-size: var(--text-sm) !important;
   color: var(--body-text-color-subdued);
 }
 .version-line strong { color: var(--body-text-color); }
 
 /* Action bar at the foot of each card. */
 .action-bar {
-  margin-top: 10px !important;
-  padding-top: 10px !important;
+  margin-top: var(--surface-rhythm) !important;
+  padding-top: var(--surface-rhythm) !important;
   border-top: 1px solid var(--border-color-primary);
   flex-wrap: wrap;
+  gap: 8px !important;
+  align-items: center;
 }
-.action-bar button { min-height: 32px !important; }
+.action-bar button {
+  min-height: 34px !important;
+  border-radius: var(--radius-md) !important;
+  font-size: var(--button-small-text-size) !important;
+  font-weight: 600 !important;
+}
 
 .subtle-note p {
   margin: 0 !important;
-  font-size: 12px !important;
+  font-size: var(--text-sm) !important;
   color: var(--body-text-color-subdued);
   font-style: italic;
 }
@@ -969,6 +1089,8 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                     if stage_group.total_count
                     else stage_group.stage_title
                 )
+                stage_obj = stage_config.get_stage(stage_group.stage_id)
+                form_schema = getattr(stage_obj, "form_schema", None)
                 with gr.Tab(label=tab_label):
                     if not stage_group.artifacts:
                         gr.Markdown(
@@ -992,11 +1114,85 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                             )
 
                             # --- The review surface: the dominant element.
+                            form_properties: List[Any] = []
                             if artifact_card.selected_version:
                                 sel_ver = artifact_card.selected_version
                                 content_kind, content_value = render_version_content(sel_ver)
+                                form_properties = (
+                                    schema_properties(form_schema)
+                                    if form_schema and content_kind == "text"
+                                    else []
+                                )
 
-                                if content_kind == "image":
+                                if form_properties:
+                                    # SPEC section 31: JSON Schema forms MAY
+                                    # be mapped to native controls instead of
+                                    # a raw JSON blob the user hand-edits.
+                                    answers = parse_form_answers(content_value)
+                                    field_components: List[Any] = []
+                                    field_names: List[str] = []
+                                    for prop_name, prop_schema in form_properties:
+                                        label = prop_schema.get(
+                                            "title", prop_name.replace("_", " ").title()
+                                        )
+                                        current = answers.get(
+                                            prop_name, prop_schema.get("default", "")
+                                        )
+                                        enum_choices = prop_schema.get("enum")
+                                        prop_type = prop_schema.get("type", "string")
+                                        if enum_choices:
+                                            field = gr.Dropdown(
+                                                choices=[str(c) for c in enum_choices],
+                                                value=(
+                                                    str(current)
+                                                    if current not in (None, "")
+                                                    else None
+                                                ),
+                                                label=label,
+                                            )
+                                        elif prop_type in ("integer", "number"):
+                                            field = gr.Number(
+                                                value=current
+                                                if isinstance(current, (int, float))
+                                                else None,
+                                                label=label,
+                                            )
+                                        elif prop_type == "boolean":
+                                            field = gr.Checkbox(
+                                                value=bool(current), label=label
+                                            )
+                                        else:
+                                            field = gr.Textbox(
+                                                value=str(current) if current is not None else "",
+                                                label=label,
+                                                lines=1,
+                                            )
+                                        field_components.append(field)
+                                        field_names.append(prop_name)
+
+                                    if "edit" in artifact_card.allowed_actions:
+                                        btn_submit_form = gr.Button(
+                                            "Submit form", variant="primary", size="sm",
+                                            scale=0, min_width=120,
+                                        )
+
+                                        def handle_form_submit(
+                                            artifact_id, *values, _names=field_names
+                                        ):
+                                            content = build_form_answers_json(
+                                                _names, list(values)
+                                            )
+                                            result = action_handler.enqueue_edit(
+                                                artifact_id, content
+                                            )
+                                            return json.dumps(result)
+
+                                        btn_submit_form.click(
+                                            handle_form_submit,
+                                            inputs=[artifact_state] + field_components,
+                                            outputs=action_sink,
+                                        )
+                                elif content_kind == "image":
                                     resolved_path = _resolve_media_path(content_value)
                                     if resolved_path:
                                         gr.Image(
@@ -1102,7 +1298,9 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                                                 )
 
                             # --- Inputs for text edits / revision notes.
-                            if "edit" in artifact_card.allowed_actions:
+                            # Skipped when a form was already rendered above
+                            # (its own Submit button is the edit path).
+                            if "edit" in artifact_card.allowed_actions and not form_properties:
                                 with gr.Row():
                                     edit_content = gr.Textbox(
                                         show_label=False,

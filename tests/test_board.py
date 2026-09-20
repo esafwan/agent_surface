@@ -1159,6 +1159,91 @@ def test_describe_select_version_conflict_returns_none_for_other_errors():
 
 
 # =============================================================================
+# JSON Schema Form Rendering (SPEC section 31)
+# =============================================================================
+
+
+def test_schema_properties_extracts_ordered_fields():
+    from surface.board import schema_properties
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "project_name": {"type": "string"},
+            "timeline": {"type": "string", "enum": ["1 week", "1 month"]},
+        },
+    }
+    props = schema_properties(schema)
+    assert [name for name, _ in props] == ["project_name", "timeline"]
+    assert props[1][1]["enum"] == ["1 week", "1 month"]
+
+
+def test_schema_properties_handles_missing_or_malformed_schema():
+    from surface.board import schema_properties
+
+    assert schema_properties(None) == []
+    assert schema_properties({}) == []
+    assert schema_properties({"properties": "not a dict"}) == []
+
+
+def test_parse_form_answers_valid_json_object():
+    from surface.board import parse_form_answers
+
+    assert parse_form_answers('{"project_name": "Acme", "budget": "5k"}') == {
+        "project_name": "Acme",
+        "budget": "5k",
+    }
+
+
+def test_parse_form_answers_handles_invalid_or_empty_content():
+    from surface.board import parse_form_answers
+
+    assert parse_form_answers(None) == {}
+    assert parse_form_answers("") == {}
+    assert parse_form_answers("not json") == {}
+    assert parse_form_answers("[1, 2, 3]") == {}  # valid JSON, not an object
+
+
+def test_build_form_answers_json_round_trips_field_values():
+    from surface.board import build_form_answers_json
+    import json as json_module
+
+    result = build_form_answers_json(
+        ["project_name", "timeline", "budget"],
+        ["Acme", "1 month", "5k"],
+    )
+    assert json_module.loads(result) == {
+        "project_name": "Acme",
+        "timeline": "1 month",
+        "budget": "5k",
+    }
+
+
+def test_form_schema_artifact_renders_dynamic_fields_not_raw_json():
+    """A form-typed artifact's stored JSON answers must drive a form_schema
+    field extraction (used to render native controls), not just be shown as
+    an opaque text blob for the user to hand-edit as JSON."""
+    from surface.board import schema_properties, parse_form_answers
+
+    store = Store(":memory:")
+    questionnaire = load_preset("questionnaire")
+    stage = questionnaire.get_stage(questionnaire.stage_order[0])
+    assert stage.form_schema is not None, "questionnaire preset must define a form_schema"
+
+    props = schema_properties(stage.form_schema)
+    assert len(props) > 0, "questionnaire preset's form_schema must declare properties"
+
+    store.create_artifact(id="q_1", stage=stage.id, title="Q1")
+    answers = {name: f"answer for {name}" for name, _ in props}
+    store.put_version("q_1", content=json.dumps(answers), content_type="application/json", select=True)
+
+    artifact = store.get_artifact("q_1")
+    version = store.get_version(artifact["selected_version_id"])
+    parsed = parse_form_answers(version["content"])
+    assert parsed == answers
+
+
+# =============================================================================
 # Issue 5: Action Gating Tests (M3, M4)
 # =============================================================================
 
@@ -1334,6 +1419,88 @@ def test_board_css_is_non_empty_stylesheet():
         assert selector in BOARD_CSS, f"missing style for {selector}"
     # Balanced braces => syntactically plausible stylesheet.
     assert BOARD_CSS.count("{") == BOARD_CSS.count("}")
+
+
+def test_board_css_uses_wide_desktop_width():
+    """
+    The board must fill a desktop viewport, not render as a phone-width column.
+
+    Two rules are required, because Gradio 5.50 constrains width in two places:
+      - the outer `.gradio-container`
+      - the inner `main.fillable:not(.fill_width)`, which Gradio caps at
+        breakpoint widths (640/768/1024/1280/1536/1920px) with specificity
+        (0,3,1) -- higher than a bare `.gradio-container` selector.
+    """
+    assert "--surface-max-width: 1600px;" in BOARD_CSS
+    assert "max-width: min(96vw, var(--surface-max-width)) !important;" in BOARD_CSS
+    # The inner Gradio cap must also be released, or it wins on specificity.
+    assert "main.fillable:not(.fill_width)" in BOARD_CSS
+    # And the old narrow column value must be gone.
+    assert "1080px" not in BOARD_CSS
+
+    # A live-browser check (1920px viewport) found that max-width alone was
+    # NOT sufficient: Gradio's own `.gradio-container-<ver>` rule sets
+    # `display:flex` with no `width`, so as a flex item centered by its
+    # parent it shrinks to its content's width regardless of max-width --
+    # measured ~514px wide on a 1920px viewport even with this max-width
+    # rule in place. `width: 100%` is what actually makes it grow to fill
+    # up to the cap; verified live afterward at 1600px on the same viewport.
+    assert "width: 100% !important;" in BOARD_CSS
+
+
+def test_board_css_only_references_real_gradio_theme_variables():
+    """
+    Every var(--x) used must be a token Gradio 5.50 actually defines
+    (gradio.themes.Soft theme CSS, or Gradio's own global scale), plus the
+    board's own `--surface-*` locals. A typo'd variable silently no-ops.
+    """
+    import re
+
+    used = set(re.findall(r"var\((--[a-z0-9-]+)", BOARD_CSS))
+    known_gradio_tokens = {
+        "--font",
+        "--text-xs",
+        "--text-sm",
+        "--text-md",
+        "--text-lg",
+        "--text-xl",
+        "--radius-sm",
+        "--radius-md",
+        "--radius-lg",
+        "--color-accent",
+        "--border-color-primary",
+        "--border-color-accent-subdued",
+        "--body-text-color",
+        "--body-text-color-subdued",
+        "--background-fill-primary",
+        "--background-fill-secondary",
+        "--shadow-drop",
+        "--shadow-drop-lg",
+        "--button-small-text-size",
+        "--layout-gap",
+    }
+    board_locals = {
+        "--surface-max-width",
+        "--surface-gutter",
+        "--surface-radius",
+        "--surface-rhythm",
+    }
+    unknown = used - known_gradio_tokens - board_locals
+    assert not unknown, f"unknown CSS variables referenced: {sorted(unknown)}"
+    # Every local the board defines for itself must also be declared.
+    for local in board_locals:
+        assert f"{local}:" in BOARD_CSS
+
+
+def test_board_css_styles_tab_strip_and_card_hierarchy():
+    """New polish pass: tab strip, accordion labels and card elevation."""
+    for selector in (
+        ".tab-container button.selected",
+        ".artifact-card:hover",
+        ".label-wrap",
+        ".action-bar button",
+    ):
+        assert selector in BOARD_CSS, f"missing style for {selector}"
 
 
 def test_format_artifact_meta_is_single_line_with_key_fields():
