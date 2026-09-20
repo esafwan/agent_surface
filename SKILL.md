@@ -400,24 +400,39 @@ When delegating to a sub-agent:
 
 ---
 
-## Limitations and Phase 0 Scope
+## Limitations and Current Scope
 
-**Phase 0 includes:**
+**Implemented (Phase 0 + Phase 1 + Phase 2):**
 - SQLite store, artifact versioning, DAG + stale propagation
-- Movie pipeline (script → shots → keyframes → clips → assembly)
-- Gradio board UI (if available; graceful fallback if not)
-- Simple event inbox with leases
-- Mock image and video providers
-- One worker session, serial processing
-- Bounded supervisor loop (for testing)
+- Movie pipeline plus questionnaire/plan_review/document_review/diff_review/
+  generic_media_pipeline presets, and a custom stage-config authoring guide
+  (`docs/stage-config-guide.md`)
+- Gradio board UI (if available; graceful fallback if not), with select-
+  version conflict surfacing
+- Event inbox with leases, bounded dispatch retry, session recycling and a
+  per-artifact worker pool (`surface serve --pool-size N`,
+  `--recycle-after-events N`) -- default remains one serial worker session
+- Mock image and video providers with cost tracking (estimate + actual);
+  provider webhook payload ingestion (`surface.webhook`) exists but is not
+  wired to an HTTP endpoint in this codebase
+- Recovery CLI (`surface stop`, `surface recover`, `surface interrupt`)
+- `surface render`/`answer`/`wait` bounded convenience mode, backed by a
+  local JSON interaction store under `.surface-board/interactions/`
+  (not the SQLite store)
+- A native-subprocess reference worker (`python -m surface.worker`) and an
+  ACP transport adapter (`surface/transports/acp.py`) -- the ACP adapter is
+  written against an assumed duck-typed client interface, has NOT been
+  verified against a real ACP SDK, and is not wired into `serve()`; treat
+  it as scaffolding for a future integration, not a working ACP path
 
-**Phase 0 does NOT include:**
+**Still NOT included:**
 - Multi-user collaboration
-- ACP transport (native stream or resume only)
-- Custom stage config authoring guide
-- Scheduled jobs or webhooks
 - Hosted/shared board service
 - TUI or non-Gradio renderers
+- A verified ACP integration (see above)
+- Live board refresh (the board's artifact/version display is built once
+  at launch; `Refresh` updates the header/status line only, not the full
+  card tree -- restart `surface serve` to see new versions/status)
 - Budget confirmation UI (deterministic backend only)
 - Robust error recovery (basic retry on lease expiry)
 
