@@ -65,8 +65,17 @@ surface --db .surface-board/state.sqlite3 serve --no-board --max-iterations 5
 ```
 surface [--db PATH] init --stage <preset>
 surface [--db PATH] status                                # summarize project state
+surface [--db PATH] tui                                   # stdlib terminal board (no gradio needed)
 surface [--db PATH] serve [--no-board] [--max-iterations N]
                           [--host HOST] [--port PORT] [--runtime-dir DIR]
+                          [--pool-size N] [--recycle-after-events N]
+surface [--db PATH] stop
+surface [--db PATH] interrupt
+surface [--db PATH] recover [--force-reclaim]
+
+surface [--db PATH] render <preset_or_path> --data <file.json>
+surface [--db PATH] answer <handle> --value <json>
+surface [--db PATH] wait <handle> --max <seconds>
 
 surface [--db PATH] store get <artifact_id>
 surface [--db PATH] store list [--stage S] [--status S]

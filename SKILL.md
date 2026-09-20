@@ -402,7 +402,7 @@ When delegating to a sub-agent:
 
 ## Limitations and Current Scope
 
-**Implemented (Phase 0 + Phase 1 + Phase 2):**
+**Implemented (Phase 0 + Phase 1 + Phase 2 + partial Phase 3):**
 - SQLite store, artifact versioning, DAG + stale propagation
 - Movie pipeline plus questionnaire/plan_review/document_review/diff_review/
   generic_media_pipeline presets, and a custom stage-config authoring guide
@@ -424,11 +424,19 @@ When delegating to a sub-agent:
   written against an assumed duck-typed client interface, has NOT been
   verified against a real ACP SDK, and is not wired into `serve()`; treat
   it as scaffolding for a future integration, not a working ACP path
+- `surface tui` (`surface/tui.py`) -- a stdlib-only, non-Gradio terminal
+  renderer. Reuses `board.py`'s gradio-independent display/action logic. This
+  is the one renderer actually run and verified end-to-end in this dev
+  environment (the Gradio board has not been, since gradio isn't installed
+  here)
+- `surface/notify.py` -- `LogNotifier`/`WebhookNotifier` notification
+  adapters and a pure `detect_notifications()` diff function; not yet wired
+  to fire automatically inside `serve()`'s loop
 
 **Still NOT included:**
 - Multi-user collaboration
 - Hosted/shared board service
-- TUI or non-Gradio renderers
+- MCP Apps / A2UI renderers
 - A verified ACP integration (see above)
 - Live board refresh (the board's artifact/version display is built once
   at launch; `Refresh` updates the header/status line only, not the full

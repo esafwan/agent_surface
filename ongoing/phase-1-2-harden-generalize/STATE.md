@@ -57,6 +57,24 @@ gating fix).
 - **`get_project_cost_summary()` unsurfaced** by any CLI command — implemented and
   correct, just not exposed as a convenience.
 - **ACP transport unverified** — see table above.
-- Multi-process supervisor pools, richer tracing beyond rehydration, TUI/non-Gradio
-  renderers, hosted/shared board service, multi-user collaboration — Phase 3 territory or
-  explicitly out of v1 scope per SPEC.
+- Multi-process supervisor pools, richer tracing beyond rehydration, hosted/shared board
+  service, multi-user collaboration — Phase 3 territory or explicitly out of v1 scope per
+  SPEC (see `PHASE3.md` in this directory for the full accounting).
+
+## Phase 3 update (same session, following user follow-up)
+
+Two of Phase 3's nine items are concretely buildable features (not infrastructure/
+ecosystem decisions) and have been built:
+
+- **`surface tui`** (`surface/tui.py`) — a stdlib-only, non-Gradio terminal renderer.
+  This is the only renderer in the system that has actually been run and verified in
+  this environment (the Gradio board never has been — see above).
+- **`surface/notify.py`** — notification adapters (`LogNotifier`, `WebhookNotifier`) and
+  a pure `detect_notifications()` diff function, per SPEC section 34/58. Not yet wired
+  to fire automatically inside `serve()`'s loop — that's a small follow-up, described in
+  the module docstring.
+
+See `PHASE3.md` for why the remaining 7 items (hosted service, multi-user collaboration,
+cross-machine scheduling, preset marketplace, MCP Apps renderer, A2UI renderer) are
+infrastructure/ecosystem decisions without a fixed "done" state, not deferred out of
+laziness.
