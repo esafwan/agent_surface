@@ -429,6 +429,10 @@ class ActionHandler:
         if not artifact:
             return {"ok": False, "error": f"Artifact {artifact_id} not found"}
 
+        error = self._validate_action_allowed(artifact_id, "lock")
+        if error:
+            return {"ok": False, "error": error}
+
         result = self.store.set_lock(artifact_id, True)
         return {"ok": True, "artifact": result}
 
@@ -440,6 +444,10 @@ class ActionHandler:
         artifact = self.store.get_artifact(artifact_id)
         if not artifact:
             return {"ok": False, "error": f"Artifact {artifact_id} not found"}
+
+        error = self._validate_action_allowed(artifact_id, "unlock")
+        if error:
+            return {"ok": False, "error": error}
 
         result = self.store.set_lock(artifact_id, False)
         return {"ok": True, "artifact": result}

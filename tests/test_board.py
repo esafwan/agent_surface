@@ -309,6 +309,21 @@ def test_action_handler_unlock(populated_store):
     assert artifact["locked"] is False
 
 
+def test_action_handler_lock_rejected_when_not_in_allowed_actions(populated_store, stage_config):
+    """A prior gap: lock/unlock were the only deterministic actions that
+    skipped _validate_action_allowed, so a stage config permitting neither
+    action still let a caller lock/unlock artifacts in that stage."""
+    handler = ActionHandler(populated_store, stage_config=stage_config)
+    # "script" stage in movie.json does not list lock/unlock in allowed_actions.
+    result = handler.lock("script_001")
+    assert result["ok"] is False
+    assert "error" in result
+
+    result = handler.unlock("script_001")
+    assert result["ok"] is False
+    assert "error" in result
+
+
 def test_action_handler_select_version(populated_store):
     """Test select_version action (deterministic)."""
     handler = ActionHandler(populated_store)
