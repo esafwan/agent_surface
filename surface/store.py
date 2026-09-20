@@ -666,12 +666,19 @@ class Store:
         return self.get_job(job_id)
 
     def cancel_job(self, job_id: str) -> Dict[str, Any]:
+        """Request cancellation of a job.
+
+        Only sets cancel_requested here; status transitions to 'cancelled' once
+        the poller has actually told the provider to cancel (SPEC section 28).
+        Setting status='cancelled' immediately would remove the job from the
+        poller's queued/running scan before provider.cancel() is ever called.
+        """
         now = _now_iso()
         with self.conn:
             cursor = self.conn.execute(
                 """
                 UPDATE jobs
-                SET cancel_requested = 1, status = 'cancelled', updated_at = ?
+                SET cancel_requested = 1, updated_at = ?
                 WHERE id = ?
                 """,
                 (now, job_id),

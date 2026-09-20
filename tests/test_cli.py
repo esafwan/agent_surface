@@ -308,7 +308,10 @@ class TestJobCommands:
         captured = capsys.readouterr()
         output = json.loads(captured.out)
 
-        assert output["status"] == "cancelled"
+        # cancel_job flags cancel_requested; a poller cycle is what actually
+        # transitions status to "cancelled" after telling the provider.
+        assert output["cancel_requested"] is True
+        assert output["status"] in ("queued", "running")
 
 
 class TestInboxCommands:

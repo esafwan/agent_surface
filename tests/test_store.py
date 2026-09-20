@@ -254,9 +254,21 @@ def test_job_lifecycle_and_cancellation():
     job2 = store.create_job(
         artifact_id="art_1", provider="video_default", kind="video"
     )
+    # cancel_job only flags cancel_requested; status stays queued/running until
+    # the poller has actually told the provider to cancel (SPEC section 28) -
+    # otherwise the job leaves the poller's scan set before cancel is ever
+    # attempted against the provider.
     cancelled_job = store.cancel_job(job2["id"])
-    assert cancelled_job["status"] == "cancelled"
+    assert cancelled_job["status"] == "queued"
     assert cancelled_job["cancel_requested"] is True
+
+    # Poller (or equivalent) then marks it cancelled after handling it.
+    finally_cancelled = store.update_job_status(job2["id"], "cancelled")
+    assert finally_cancelled["status"] == "cancelled"
+
+    # A late "finish" for an already-cancelled job MUST NOT become succeeded.
+    late_finish = store.finish_job(job2["id"], result={"image_url": "late.png"})
+    assert late_finish["status"] == "cancelled"
 
     # Late result on cancelled job MUST NOT succeed
     late_finish = store.finish_job(

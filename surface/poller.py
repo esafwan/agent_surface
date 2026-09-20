@@ -166,7 +166,11 @@ class Poller:
             content_type = result.get("content_type", "text/plain")
             metadata = result.get("metadata", {})
 
-            # Create new artifact version with result
+            # Create new artifact version with result. Use the job_id as the
+            # idempotency key: job_id is stable and unique per job, so a
+            # crash/restart that re-observes the same provider success will
+            # dedupe against the version already created for this job instead
+            # of creating a duplicate (SPEC section 16, section 59).
             version_result = self.store.put_version(
                 artifact_id,
                 content_ref=content_ref,
@@ -174,9 +178,13 @@ class Poller:
                 params=metadata,
                 created_by="poller",
                 note="Generated via provider",
-                source_event_id=None,  # Poller-originated, not from event
+                source_event_id=f"job:{job_id}",
                 select=True,  # Auto-select unless cancelled
             )
+
+            # A successful generation moves the artifact out of "generating"
+            # into "review" so a human can act on it (SPEC section 11).
+            self.store.set_status(artifact_id, "review")
 
             # Update job status to succeeded with result
             self.store.update_job_status(
