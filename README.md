@@ -25,11 +25,19 @@ open are tracked in [`ongoing/phase-0-build/STATE.md`](ongoing/phase-0-build/STA
 - `surface serve` genuinely wires store + supervisor + poller + worker + board together,
   with an authenticated loopback bind (unpredictable per-run token) for remote-adjacent access.
 
-**Known gap:** the Gradio board (`surface/board.py`) builds its artifact/version display
-once at launch — it does not yet live-refresh when versions/status change without
-restarting the process. This is the top item for Phase 1. `gradio` is not installed in
-the primary dev/test environment, so the board itself has not been visually run — the CLI
-path (`--no-board`) is the fully verified path today.
+**Status of the Gradio board:** live-tested in a real browser (gradio 5.50 — see below for
+why the version matters). What's confirmed working: thread-safe under real Gradio request
+dispatch, JSON-Schema-driven form rendering for `form`-typed artifacts (native text/
+dropdown/number/checkbox controls instead of a raw JSON blob), and a desktop-width layout.
+**Known gap:** the board builds its artifact/version display once at launch — it does not
+yet live-refresh when versions/status change without restarting the process. This is the
+top remaining item for Phase 1. The stdlib `surface tui` command (see below) has no such
+gap and needs no gradio install at all.
+
+**Gradio version pin:** use gradio `>=4.0,<6` (`pip install -e ".[board]"` already pins
+this). Gradio 6's frontend (a Svelte 5 rewrite) throws a `effect_orphan` error and renders
+a blank page with this board as of gradio 6.28 — confirmed by live testing, not a
+theoretical incompatibility. Gradio 5.50 renders correctly.
 
 ## Quickstart
 
