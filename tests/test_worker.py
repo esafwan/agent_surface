@@ -745,6 +745,75 @@ class TestBudgetEnforcement:
         assert artifact["status"] == "draft"
         assert len(store.list_jobs_by_status("queued")) == 1
 
+    def test_payload_cost_estimate_is_the_value_actually_enforced(
+        self, setup_movie_artifacts, movie_config
+    ):
+        """The event payload's cost_estimate must be the value checked
+        against the budget AND the value recorded on the created job. A
+        prior bug read cost_estimate from the worker's own internally
+        constructed provider `request` dict (which never contains that key),
+        so it was always 0.0 and no request could ever exceed any budget."""
+        store = setup_movie_artifacts
+        budgeted_config = dict(movie_config)
+        budgeted_config["budget"] = {"project_usd": 1.0}
+
+        over_budget_event = {
+            "event_id": "evt_over",
+            "type": "regenerate",
+            "artifact_id": "keyframe_1",
+            "payload": {"cost_estimate": 5.0},
+            "config": budgeted_config,
+        }
+        result = handle_event(over_budget_event, store)
+        assert result["ok"] is False
+        assert "budget" in result["error"].lower()
+        assert store.list_jobs_by_status("queued") == []
+
+        under_budget_event = {
+            "event_id": "evt_under",
+            "type": "regenerate",
+            "artifact_id": "keyframe_1",
+            "payload": {"cost_estimate": 0.1},
+            "config": budgeted_config,
+        }
+        result2 = handle_event(under_budget_event, store)
+        assert result2["ok"] is True
+        jobs = store.list_jobs_by_status("queued")
+        assert len(jobs) == 1
+        assert jobs[0]["cost_estimate"] == 0.1
+
+
+class TestGenerationJobIdempotency:
+    """store.create_job has no built-in dedupe key, so the worker itself
+    must guard against a redelivered event (e.g. the supervisor's bounded
+    retry, SPEC section 40) creating a second, duplicate provider job."""
+
+    def test_redelivered_regenerate_event_does_not_create_a_second_job(
+        self, setup_movie_artifacts, movie_config
+    ):
+        store = setup_movie_artifacts
+        event = {
+            "event_id": "evt_regen_once",
+            "type": "regenerate",
+            "artifact_id": "keyframe_1",
+            "payload": {},
+            "config": movie_config,
+        }
+
+        first = handle_event(event, store)
+        assert first["ok"] is True
+        second = handle_event(event, store)
+        assert second["ok"] is True
+        assert second["job_id"] == first["job_id"]
+
+        all_jobs = (
+            store.list_jobs_by_status("queued")
+            + store.list_jobs_by_status("running")
+            + store.list_jobs_by_status("succeeded")
+        )
+        matching = [j for j in all_jobs if j["artifact_id"] == "keyframe_1"]
+        assert len(matching) == 1
+
     def test_regenerate_within_budget_allowed(self, setup_movie_artifacts, movie_config):
         """A request within budget proceeds normally."""
         store = setup_movie_artifacts

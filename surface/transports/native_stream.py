@@ -30,6 +30,12 @@ class WorkerSession:
         self.created_at = datetime.now(timezone.utc).isoformat()
         self.last_activity = self.created_at
         self._lock = threading.Lock()
+        # Set on a send_event timeout. Without request/response correlation,
+        # a late reply to a timed-out turn would otherwise sit in
+        # stdout_queue and be consumed as the reply to the *next* turn,
+        # silently acking/failing the wrong event. Once poisoned this
+        # session must never be reused for another send_event.
+        self.poisoned = False
 
         # Background reader: readline() on a pipe is unbounded, so a hung
         # worker subprocess would block send_event() forever. A dedicated
@@ -57,8 +63,8 @@ class WorkerSession:
             self.stdout_queue.put(None)
 
     def is_running(self) -> bool:
-        """Check if the subprocess is still running."""
-        return self.process.poll() is None
+        """Check if the subprocess is still running and not poisoned."""
+        return not self.poisoned and self.process.poll() is None
 
     def update_activity(self) -> None:
         """Update the last activity timestamp."""
@@ -186,6 +192,18 @@ class NativeStreamTransport:
             try:
                 result_line = worker_session.stdout_queue.get(timeout=self.timeout)
             except queue.Empty:
+                # There is no request/response correlation on this stream, so
+                # if the worker eventually does reply, that reply would be
+                # read as the answer to whatever the *next* send_event call
+                # is for this session — silently acking/failing the wrong
+                # event. Poison the session and kill the process so it can
+                # never be reused; the caller (Supervisor) must start/resume
+                # a fresh worker session for the next turn.
+                worker_session.poisoned = True
+                try:
+                    worker_session.process.kill()
+                except Exception:
+                    pass
                 return {
                     "ok": False,
                     "error": "timeout",

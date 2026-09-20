@@ -78,15 +78,25 @@ class Poller:
                 jobs_processed += 1
                 continue
 
-            # Handle cancellation request
-            if cancel_requested and provider_job_id:
-                try:
-                    provider.cancel(provider_job_id)
-                    logger.info(f"Cancelled provider job {provider_job_id} for job {job_id}")
-                except Exception as e:
-                    logger.warning(f"Error cancelling job {job_id}: {e}")
-                # Mark as cancelled in store
+            # Handle cancellation request. This must fire even if the job was
+            # cancelled before ever being submitted to the provider (no
+            # provider_job_id yet) — otherwise a job cancelled while still
+            # queued falls through to the submit branch below and gets
+            # charged/started anyway, only cancelled on the *next* poll.
+            if cancel_requested:
+                if provider_job_id:
+                    try:
+                        provider.cancel(provider_job_id)
+                        logger.info(f"Cancelled provider job {provider_job_id} for job {job_id}")
+                    except Exception as e:
+                        logger.warning(f"Error cancelling job {job_id}: {e}")
+                else:
+                    logger.info(f"Job {job_id} cancelled before submission; skipping provider.submit()")
+                # Mark as cancelled in store; also move the artifact out of
+                # "generating" so it doesn't spin forever with no path to
+                # change (SPEC section 11 lists "cancelled" as a core state).
                 self.store.update_job_status(job_id, "cancelled")
+                self.store.set_status(artifact_id, "cancelled")
                 jobs_processed += 1
                 continue
 
@@ -227,6 +237,10 @@ class Poller:
         """
         try:
             self.store.update_job_status(job_id, "failed", result={"error": error_message})
+            # A failed generation must not leave the artifact stuck showing
+            # "generating" forever with no way for the poller's own state to
+            # ever change it again.
+            self.store.set_status(artifact_id, "failed")
             self.store.enqueue_event(
                 type=event_type,
                 payload={

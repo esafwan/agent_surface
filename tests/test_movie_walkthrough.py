@@ -538,23 +538,48 @@ class TestMovieWalkthroughRealArchitecture:
         job = store.create_job(
             artifact_id="clip_direct", provider="video_default", kind="video", request={},
         )
+
+        # Submit first, THEN cancel — this is the path where provider.cancel()
+        # must actually be reached and observed.
+        provider = MockVideoProvider(polls_to_success=5)
+        p = Poller(store, {"video_default": provider})
+        p.poll_once()  # submit
+
         store.cancel_job(job["id"])
         job_after = store.get_job(job["id"])
         assert job_after["cancel_requested"] is True
-        assert job_after["status"] == "queued", (
+        assert job_after["status"] == "running", (
             "cancel_job() must only set cancel_requested; status transitions "
             "to 'cancelled' only once the poller calls provider.cancel()"
         )
 
-        provider = MockVideoProvider(polls_to_success=5)
-        p = Poller(store, {"video_default": provider})
-        p.poll_once()  # submit
         p.poll_once()  # observes cancel_requested + provider_job_id set, calls provider.cancel()
 
         job_final = store.get_job(job["id"])
         assert job_final["status"] == "cancelled"
         provider_job_id = job_final["provider_job_id"]
         assert provider._jobs[provider_job_id]["cancelled"] is True
+
+    def test_cancel_before_submission_never_submits_to_provider(self, store):
+        """A job cancelled while still queued (never submitted) must not be
+        submitted to the provider on a later poll — otherwise a real paid
+        provider would be charged for a generation the user already
+        cancelled before it ever started (SPEC section 28)."""
+        store.create_artifact(id="clip_presubmit", stage="clips", title="Pre-submit Cancel Test")
+        job = store.create_job(
+            artifact_id="clip_presubmit", provider="video_default", kind="video", request={},
+        )
+        store.cancel_job(job["id"])
+        assert store.get_job(job["id"])["status"] == "queued"
+
+        provider = MockVideoProvider(polls_to_success=5)
+        p = Poller(store, {"video_default": provider})
+        p.poll_once()
+
+        job_final = store.get_job(job["id"])
+        assert job_final["status"] == "cancelled"
+        assert job_final["provider_job_id"] is None
+        assert provider._jobs == {}, "provider.submit() must never have been called"
 
 
 def video_provider_state(poller: Poller) -> dict:

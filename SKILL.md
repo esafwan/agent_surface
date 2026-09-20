@@ -51,7 +51,7 @@ This launches:
 3. **Poller** — polls generation jobs and emits completions
 4. **Board** — Gradio UI (if installed; logs if unavailable)
 
-The supervisor runs a bounded loop (default: 1 iteration) for Phase 0 testability. Extend with `--supervisor-iterations` to run more turns, or run `surface serve` in a terminal/tmux for continuous operation.
+By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board (if gradio is installed) launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`) with an auto-generated bearer token written to `.surface-board/run/token`; pass `--no-board` to run supervisor+poller only.
 
 ### Check Project Status
 

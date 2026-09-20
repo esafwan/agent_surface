@@ -191,8 +191,10 @@ def _handle_revise(
 
     # For image/video artifacts, create a job
     else:
+        cost_estimate = float(payload.get("cost_estimate", 0.0) or 0.0)
         return _create_generation_job(
-            artifact_id, artifact, event_id, store, config, note=note
+            artifact_id, artifact, event_id, store, config,
+            note=note, cost_estimate=cost_estimate,
         )
 
 
@@ -214,7 +216,29 @@ def _handle_regenerate(
     if not artifact:
         return {"ok": False, "error": f"Artifact {artifact_id} not found"}
 
-    return _create_generation_job(artifact_id, artifact, event_id, store, config)
+    cost_estimate = float(payload.get("cost_estimate", 0.0) or 0.0)
+    return _create_generation_job(
+        artifact_id, artifact, event_id, store, config, cost_estimate=cost_estimate
+    )
+
+
+_JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
+
+
+def _find_job_for_event(store: Store, artifact_id: str, event_id: str) -> Optional[Dict[str, Any]]:
+    """Find an existing job created for this (artifact_id, event_id), if any.
+
+    store.create_job has no built-in dedupe key, so this is the worker's
+    idempotency guard against redelivered events (e.g. the supervisor's
+    bounded retry) creating duplicate provider jobs.
+    """
+    for status in _JOB_STATUSES:
+        for job in store.list_jobs_by_status(status):
+            if job.get("artifact_id") != artifact_id:
+                continue
+            if job.get("request", {}).get("source_event_id") == event_id:
+                return job
+    return None
 
 
 def _create_generation_job(
@@ -224,6 +248,7 @@ def _create_generation_job(
     store: Store,
     config: Dict[str, Any],
     note: str = "",
+    cost_estimate: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Create a generation job for an artifact.
@@ -251,8 +276,18 @@ def _create_generation_job(
 
         kind = artifact_type or "text"
 
+        # Idempotency: store.create_job has no built-in dedupe key, so a
+        # retried event (SPEC section 40; also the S3 bounded-retry path)
+        # would otherwise create a second, duplicate provider job. Stamp the
+        # originating event_id into the request and check for an existing
+        # job with the same (artifact_id, source_event_id) across every job
+        # status before creating a new one.
+        existing_job = _find_job_for_event(store, artifact_id, event_id)
+        if existing_job is not None:
+            return {"ok": True, "job_id": existing_job["id"]}
+
         # Construct request with artifact's selected version content/prompt
-        request = {"note": note}
+        request = {"note": note, "source_event_id": event_id}
         if artifact["selected_version_id"]:
             selected_ver = store.get_version(artifact["selected_version_id"])
             if selected_ver:
@@ -262,7 +297,10 @@ def _create_generation_job(
                     request["prompt"] = selected_ver["prompt"]
 
         # S7: enforce budget limits (SPEC section 39) before creating the job.
-        cost_estimate = float(request.get("cost_estimate", 0.0) or 0.0)
+        # cost_estimate comes from the caller (the event payload), NOT from
+        # `request` — `request` is a dict this function itself constructs
+        # for the provider and never contains a cost_estimate key, so reading
+        # it from there always evaluated to 0.0 and made enforcement inert.
         budget_error = _check_budget(config, stage_id, cost_estimate, store)
         if budget_error:
             return {"ok": False, "error": budget_error}

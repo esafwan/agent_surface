@@ -163,6 +163,10 @@ class TestPollerBasicFlow:
         ).fetchall()
         assert len(events) == 1
 
+        # A failed generation must not leave the artifact stuck showing
+        # "generating" forever with no path to ever change again.
+        assert store.get_artifact("img_1")["status"] == "failed"
+
     def test_submit_failure_marks_job_failed(self):
         """If provider.submit() raises exception, job should be marked failed."""
         store = Store(":memory:")
@@ -221,6 +225,29 @@ class TestPollerCancellation:
         job_after = store.get_job(job["id"])
         assert job_after["status"] == "cancelled"
         assert job_after["cancel_requested"] is True
+
+    def test_cancel_before_submission_never_calls_provider_submit(self):
+        """A job cancelled while still queued (never submitted to the
+        provider) must be marked cancelled WITHOUT ever calling
+        provider.submit() on a later poll — otherwise a real paid provider
+        would be charged for a generation the user cancelled before it
+        started (SPEC section 28)."""
+        store = Store(":memory:")
+        store.create_artifact(id="img_presubmit", stage="keyframes", title="Image")
+        job = store.create_job(
+            artifact_id="img_presubmit", provider="image", kind="image", request={},
+        )
+        store.cancel_job(job["id"])
+        assert store.get_job(job["id"])["status"] == "queued"
+
+        provider = MockImageProvider(polls_to_success=10)
+        poller = Poller(store, {"image": provider})
+        poller.poll_once()
+
+        job_after = store.get_job(job["id"])
+        assert job_after["status"] == "cancelled"
+        assert job_after["provider_job_id"] is None
+        assert provider._jobs == {}, "provider.submit() must never have been called"
 
     def test_cancellation_then_late_success_ignored(self):
         """Late success from provider should not override a cancelled job."""

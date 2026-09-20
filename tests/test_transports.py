@@ -206,6 +206,51 @@ class TestNativeStreamTransportSendEvent:
 
         transport.close(session)
 
+    def test_timed_out_session_is_never_reused_for_a_later_reply(self):
+        """A session that times out must be poisoned so a late-arriving reply
+        can never be read as the answer to a DIFFERENT, later send_event call
+        on the same session. Without this, there is no request/response
+        correlation on the stdout stream, so a stale reply would silently
+        ack/fail whichever event is dispatched next."""
+        # This worker replies to the FIRST line only after a delay long
+        # enough to be classified as a timeout, then immediately replies to
+        # anything else it reads. If the session were reused, that first
+        # (stale) reply would be consumed as the answer to the second call.
+        slow_then_fast_worker = [
+            sys.executable,
+            "-c",
+            (
+                "import sys, time, json\n"
+                "line = sys.stdin.readline()\n"
+                "time.sleep(0.5)\n"
+                "print(json.dumps({'ok': True, 'stale': True}), flush=True)\n"
+            ),
+        ]
+        transport = NativeStreamTransport(command=slow_then_fast_worker, timeout=0.1)
+        session = transport.start({"project_id": "test"})
+
+        first = transport.send_event(session, {
+            "event_id": "evt_first", "type": "edit", "payload": {},
+        })
+        assert first["ok"] is False
+        assert "timeout" in first["error"].lower()
+
+        # The session must be dead now — is_alive() must reflect that so the
+        # Supervisor is forced to start/resume a fresh worker session rather
+        # than reusing this one.
+        assert transport.is_alive(session) is False
+
+        # Even if something tried to send another event on this same
+        # (poisoned) session, it must fail immediately rather than picking
+        # up the stale reply that eventually arrives.
+        second = transport.send_event(session, {
+            "event_id": "evt_second", "type": "edit", "payload": {},
+        })
+        assert second["ok"] is False
+        assert second.get("result", {}).get("stale") is not True
+
+        transport.close(session)
+
 
 class TestNativeStreamTransportInterrupt:
     """Test NativeStreamTransport.interrupt()"""
