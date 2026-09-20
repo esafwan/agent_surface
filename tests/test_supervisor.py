@@ -633,3 +633,436 @@ class TestInterrupt:
         result = supervisor_with_native.interrupt_worker()
 
         assert result is False
+
+
+# ============================================================================
+# Phase 1: interrupt-on-demand, recycling, pool, rehydration
+# ============================================================================
+
+
+class TestRequestWorkerInterrupt:
+    """Public caller-facing worker-turn cancellation."""
+
+    def test_no_session_returns_clean_result(self, supervisor_with_native):
+        """With no active session this is a clean no-op, not an error."""
+        result = supervisor_with_native.request_worker_interrupt()
+
+        assert result["ok"] is True
+        assert result["interrupted"] is False
+        assert result["message"] == "nothing to interrupt"
+        assert result["sessions"] == []
+
+    def test_interrupt_of_in_flight_dispatch_does_not_ack(
+        self, in_memory_store, movie_config, supervisor_config
+    ):
+        """Interrupting an in-flight turn must NOT ack the event; it must be
+        routed through the retry path (left processing with its lease)."""
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingTransport:
+            """Transport whose turn blocks until the test releases it, then
+            reports success -- proving the interrupt (not the worker result)
+            is what prevents the ack."""
+
+            def __init__(self):
+                self.interrupted = 0
+
+            def start(self, ctx):
+                return Mock(session_id="session_block")
+
+            def resume(self, ref, ctx):
+                return self.start(ctx)
+
+            def is_alive(self, s):
+                return True
+
+            def close(self, s):
+                pass
+
+            def send_event(self, s, ctx):
+                started.set()
+                release.wait(timeout=5)
+                return {"ok": True, "result": {}}
+
+            def interrupt(self, s):
+                self.interrupted += 1
+                release.set()
+                return {"ok": True}
+
+        transport = BlockingTransport()
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=transport,
+            stage_config=movie_config,
+            config=supervisor_config,
+        )
+
+        in_memory_store.create_artifact("art_1", "script", "Script 1")
+        event = in_memory_store.enqueue_event(
+            type="edit", payload={}, artifact_id="art_1"
+        )
+
+        # The dispatch runs on this thread (the store's sqlite connection is
+        # bound to it); the interrupt arrives from another thread, exactly as
+        # a CLI/board "cancel this turn" action would.
+        holder = {}
+
+        def interrupter():
+            started.wait(timeout=5)
+            holder["result"] = supervisor.request_worker_interrupt()
+
+        t = threading.Thread(target=interrupter)
+        t.start()
+        dispatched = supervisor.claim_and_dispatch_event()
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert dispatched["id"] == event["id"]
+
+        result = holder["result"]
+        assert result["ok"] is True
+        assert result["interrupted"] is True
+        assert result["sessions"][0]["in_flight_event_id"] == event["id"]
+        assert transport.interrupted == 1
+
+        # Critically: not acked. Left processing with its lease so the
+        # existing bounded-retry / lease-expiry path retries it.
+        updated = in_memory_store.get_event(event["id"])
+        assert updated["status"] == "processing"
+        assert updated["attempt_count"] == 1
+        assert supervisor.event_count == 0
+
+    def test_interrupt_with_idle_session_does_not_poison_next_turn(
+        self, supervisor_with_native, in_memory_store
+    ):
+        """Interrupting while nothing is in flight must not cause the NEXT
+        event to be treated as interrupted."""
+        supervisor_with_native.start_worker()
+        supervisor_with_native.transport.interrupt = Mock(return_value={"ok": True})
+
+        result = supervisor_with_native.request_worker_interrupt()
+        assert result["interrupted"] is True
+        assert result["sessions"][0]["in_flight_event_id"] is None
+
+        in_memory_store.create_artifact("art_1", "script", "Script 1")
+        event = in_memory_store.enqueue_event(
+            type="edit", payload={}, artifact_id="art_1"
+        )
+        supervisor_with_native.claim_and_dispatch_event()
+        assert in_memory_store.get_event(event["id"])["status"] == "acked"
+
+        supervisor_with_native.stop_worker()
+
+
+class TestRecyclingWiring:
+    """recycle_after_events / recycle_after_tokens wiring."""
+
+    def test_recycle_after_events_replaces_session_between_turns(
+        self, in_memory_store, movie_config, native_stream_transport
+    ):
+        config = SupervisorConfig(worker_id="w", recycle_after_events=2)
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=native_stream_transport,
+            stage_config=movie_config,
+            config=config,
+        )
+        for i in range(3):
+            in_memory_store.create_artifact(f"art_{i}", "script", f"A{i}")
+            in_memory_store.enqueue_event(
+                type="edit", payload={}, artifact_id=f"art_{i}"
+            )
+
+        supervisor.claim_and_dispatch_event()
+        first_session = supervisor.worker_session
+        supervisor.claim_and_dispatch_event()
+        assert supervisor.worker_session is first_session
+        assert supervisor.event_count == 2
+
+        # Third dispatch recycles BEFORE claiming/dispatching.
+        supervisor.claim_and_dispatch_event()
+        assert supervisor.worker_session is not first_session
+        assert not native_stream_transport.is_alive(first_session)
+        assert supervisor.event_count == 1  # reset, then +1 for the 3rd event
+
+        cursor = in_memory_store.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM events WHERE status = 'acked'")
+        assert cursor.fetchone()[0] == 3
+
+        supervisor.stop_all_workers()
+
+    def test_recycle_after_tokens_uses_caller_supplied_counts(
+        self, in_memory_store, movie_config, native_stream_transport
+    ):
+        """recycle_after_tokens is wired but inert unless a caller passes
+        token_count (no worker in this codebase reports usage yet)."""
+        config = SupervisorConfig(worker_id="w", recycle_after_tokens=100)
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=native_stream_transport,
+            stage_config=movie_config,
+            config=config,
+        )
+        for i in range(3):
+            in_memory_store.create_artifact(f"art_{i}", "script", f"A{i}")
+            in_memory_store.enqueue_event(
+                type="edit", payload={}, artifact_id=f"art_{i}"
+            )
+
+        supervisor.claim_and_dispatch_event(token_count=60)
+        first_session = supervisor.worker_session
+        assert supervisor.token_count == 60
+        supervisor.claim_and_dispatch_event(token_count=60)
+        assert supervisor.token_count == 120
+        assert supervisor.worker_session is first_session
+
+        supervisor.claim_and_dispatch_event()
+        assert supervisor.worker_session is not first_session
+        assert supervisor.token_count == 0
+
+        supervisor.stop_all_workers()
+
+    def test_default_dispatch_never_accumulates_tokens(
+        self, supervisor_with_native, in_memory_store
+    ):
+        in_memory_store.create_artifact("art_1", "script", "S")
+        in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_1")
+        supervisor_with_native.claim_and_dispatch_event()
+        assert supervisor_with_native.token_count == 0
+        supervisor_with_native.stop_worker()
+
+
+@pytest.fixture
+def slow_worker_command():
+    """Echo worker that takes ~0.4s per turn, to expose (non-)concurrency."""
+    return [
+        sys.executable,
+        "-c",
+        """
+import sys, json, time
+for line in sys.stdin:
+    data = json.loads(line)
+    time.sleep(0.4)
+    print(json.dumps({"ok": True, "result": {"processed": data.get("event_id")}}))
+    sys.stdout.flush()
+""",
+    ]
+
+
+class TestWorkerPool:
+    """Bounded per-artifact worker pool (SPEC section 25)."""
+
+    def test_pool_size_one_is_serial_default(self, supervisor_with_native):
+        assert supervisor_with_native.pool_size == 1
+        assert supervisor_with_native._pool_slots == {}
+
+    def test_invalid_pool_size(self, in_memory_store, movie_config, native_stream_transport):
+        with pytest.raises(ValueError):
+            Supervisor(
+                store=in_memory_store,
+                transport=native_stream_transport,
+                stage_config=movie_config,
+                pool_size=0,
+            )
+
+    def test_pool_dispatches_different_artifacts_concurrently(
+        self, in_memory_store, movie_config, slow_worker_command, supervisor_config
+    ):
+        import time
+
+        transport = NativeStreamTransport(command=slow_worker_command)
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=transport,
+            stage_config=movie_config,
+            config=supervisor_config,
+            pool_size=2,
+        )
+
+        ids = []
+        for i in range(2):
+            in_memory_store.create_artifact(f"art_{i}", "script", f"A{i}")
+            ids.append(
+                in_memory_store.enqueue_event(
+                    type="edit", payload={}, artifact_id=f"art_{i}"
+                )["id"]
+            )
+
+        # Pre-start sessions so subprocess spawn time isn't in the timing.
+        supervisor._ensure_slot_session(0)
+        supervisor._ensure_slot_session(1)
+
+        t0 = time.time()
+        dispatched = supervisor.run_pool_once()
+        elapsed = time.time() - t0
+
+        assert sorted(e["id"] for e in dispatched) == sorted(ids)
+        for eid in ids:
+            assert in_memory_store.get_event(eid)["status"] == "acked"
+        # Two 0.4s turns ran concurrently, not one after the other.
+        assert elapsed < 0.7, f"turns appear serialized (elapsed={elapsed:.2f}s)"
+
+        # Two distinct worker sessions were used.
+        assert supervisor.worker_session.session_id != (
+            supervisor._pool_slots[1]["session"].session_id
+        )
+
+        supervisor.stop_all_workers()
+
+    def test_pool_serializes_same_artifact_events(
+        self, in_memory_store, movie_config, slow_worker_command, supervisor_config
+    ):
+        """Two events for the SAME artifact must never occupy two pool slots:
+        the store's artifact_locks row taken by the first claim makes the
+        second event ineligible until the first is acked."""
+        transport = NativeStreamTransport(command=slow_worker_command)
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=transport,
+            stage_config=movie_config,
+            config=supervisor_config,
+            pool_size=3,
+        )
+
+        in_memory_store.create_artifact("art_1", "script", "Script 1")
+        e1 = in_memory_store.enqueue_event(
+            type="edit", payload={}, artifact_id="art_1"
+        )
+        e2 = in_memory_store.enqueue_event(
+            type="edit", payload={}, artifact_id="art_1"
+        )
+
+        batch1 = supervisor.run_pool_once()
+        assert [e["id"] for e in batch1] == [e1["id"]], "second same-artifact event was claimed concurrently"
+        assert in_memory_store.get_event(e1["id"])["status"] == "acked"
+        assert in_memory_store.get_event(e2["id"])["status"] == "pending"
+
+        batch2 = supervisor.run_pool_once()
+        assert [e["id"] for e in batch2] == [e2["id"]]
+        assert in_memory_store.get_event(e2["id"])["status"] == "acked"
+
+        supervisor.stop_all_workers()
+
+    def test_pool_mixed_same_and_different_artifacts(
+        self, in_memory_store, movie_config, native_stream_transport, supervisor_config
+    ):
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=native_stream_transport,
+            stage_config=movie_config,
+            config=supervisor_config,
+            pool_size=3,
+        )
+        in_memory_store.create_artifact("art_a", "script", "A")
+        in_memory_store.create_artifact("art_b", "shots", "B")
+        a1 = in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_a")
+        a2 = in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_a")
+        b1 = in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_b")
+
+        batch = supervisor.run_pool_once()
+        claimed = {e["id"] for e in batch}
+        assert claimed == {a1["id"], b1["id"]}
+        assert in_memory_store.get_event(a2["id"])["status"] == "pending"
+
+        supervisor.run_pool_once()
+        assert in_memory_store.get_event(a2["id"])["status"] == "acked"
+
+        supervisor.stop_all_workers()
+
+    def test_pool_failure_does_not_ack(
+        self, in_memory_store, movie_config, native_stream_transport, supervisor_config
+    ):
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=native_stream_transport,
+            stage_config=movie_config,
+            config=supervisor_config,
+            pool_size=2,
+        )
+        native_stream_transport.send_event = Mock(
+            return_value={"ok": False, "error": "boom"}
+        )
+        in_memory_store.create_artifact("art_a", "script", "A")
+        in_memory_store.create_artifact("art_b", "shots", "B")
+        in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_a")
+        in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_b")
+
+        batch = supervisor.run_pool_once()
+        assert len(batch) == 2
+        for e in batch:
+            assert in_memory_store.get_event(e["id"])["status"] == "processing"
+        assert supervisor.event_count == 0
+
+        supervisor.stop_all_workers()
+
+    def test_run_once_uses_pool_when_pool_size_gt_one(
+        self, in_memory_store, movie_config, native_stream_transport, supervisor_config
+    ):
+        supervisor = Supervisor(
+            store=in_memory_store,
+            transport=native_stream_transport,
+            stage_config=movie_config,
+            config=supervisor_config,
+            pool_size=2,
+        )
+        assert supervisor.run_once() is False
+
+        in_memory_store.create_artifact("art_a", "script", "A")
+        in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_a")
+        assert supervisor.run_once() is True
+
+        supervisor.stop_all_workers()
+
+
+class TestRehydrationSummaryPhase1:
+    """Phase 1 rehydration hardening (SPEC section 23)."""
+
+    def test_pending_event_count_counts_events_not_artifacts(
+        self, supervisor_with_native, in_memory_store
+    ):
+        in_memory_store.create_artifact("art_1", "script", "S", status="generating")
+        in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_1")
+        in_memory_store.enqueue_event(type="edit", payload={}, artifact_id="art_1")
+
+        summary = supervisor_with_native._build_rehydration_summary()
+
+        assert summary["pending_event_count"] == 2
+        assert summary["processing_event_count"] == 0
+        assert summary["generating_artifact_count"] == 1
+
+        # Claiming one moves it from pending to processing.
+        in_memory_store.claim_next_event("w", lease_seconds=60)
+        summary = supervisor_with_native._build_rehydration_summary()
+        assert summary["pending_event_count"] == 1
+        assert summary["processing_event_count"] == 1
+
+    def test_recent_event_ids_include_completed_activity(
+        self, supervisor_with_native, in_memory_store
+    ):
+        in_memory_store.create_artifact("art_1", "script", "S")
+        e1 = in_memory_store.enqueue_event(
+            type="edit", payload={}, artifact_id="art_1"
+        )
+        in_memory_store.claim_next_event("w", lease_seconds=60)
+        in_memory_store.ack_event(e1["id"])
+        e2 = in_memory_store.enqueue_event(
+            type="edit", payload={}, artifact_id="art_1"
+        )
+
+        summary = supervisor_with_native._build_rehydration_summary()
+        # Newest first, and the just-acked event is still "recent activity".
+        assert summary["recent_event_ids"][0] == e2["id"]
+        assert e1["id"] in summary["recent_event_ids"]
+
+    def test_important_constraints_from_stage_config(self, supervisor_with_native):
+        summary = supervisor_with_native._build_rehydration_summary()
+        config = supervisor_with_native.stage_config
+        if config.budget or config.completion:
+            assert "important_constraints" in summary
+            if config.budget:
+                assert summary["important_constraints"]["budget"] == config.budget
+        else:
+            # Omitted rather than fabricated when nothing declares constraints.
+            assert "important_constraints" not in summary
