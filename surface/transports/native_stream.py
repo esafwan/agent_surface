@@ -6,6 +6,7 @@ using conceptual envelope: {"type":"event","event_id":"evt_143","payload":{...}}
 """
 
 import json
+import queue
 import subprocess
 import sys
 import threading
@@ -29,6 +30,31 @@ class WorkerSession:
         self.created_at = datetime.now(timezone.utc).isoformat()
         self.last_activity = self.created_at
         self._lock = threading.Lock()
+
+        # Background reader: readline() on a pipe is unbounded, so a hung
+        # worker subprocess would block send_event() forever. A dedicated
+        # daemon thread continuously drains stdout into a queue; send_event
+        # then does a bounded queue.get(timeout=...) instead of a blocking
+        # readline(), which is what actually enforces the turn timeout
+        # (SPEC section 22: supervisor MUST detect turn timeout).
+        self.stdout_queue: "queue.Queue" = queue.Queue()
+        self._reader_thread = threading.Thread(
+            target=self._read_stdout_loop, daemon=True
+        )
+        self._reader_thread.start()
+
+    def _read_stdout_loop(self) -> None:
+        """Continuously read lines from the subprocess stdout into a queue."""
+        try:
+            for line in iter(self.process.stdout.readline, ""):
+                if line == "":
+                    break
+                self.stdout_queue.put(line)
+        except Exception:
+            pass
+        finally:
+            # Signal EOF/closed connection to any waiting consumer.
+            self.stdout_queue.put(None)
 
     def is_running(self) -> bool:
         """Check if the subprocess is still running."""
@@ -154,8 +180,17 @@ class NativeStreamTransport:
             worker_session.process.stdin.flush()
             worker_session.update_activity()
 
-            # Read response (single JSON line)
-            result_line = worker_session.process.stdout.readline()
+            # Read response (single JSON line), bounded by self.timeout so a
+            # hung worker subprocess cannot block the supervisor forever
+            # (SPEC section 22: turn timeout MUST be detected).
+            try:
+                result_line = worker_session.stdout_queue.get(timeout=self.timeout)
+            except queue.Empty:
+                return {
+                    "ok": False,
+                    "error": "timeout",
+                }
+
             if not result_line:
                 return {
                     "ok": False,

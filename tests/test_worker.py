@@ -649,3 +649,120 @@ class TestConfigLookups:
         """Should return None for text stages (no provider)."""
         provider = _get_provider_for_stage("script", movie_config)
         assert provider is None
+
+
+class TestLockedArtifactRegeneration:
+    """SPEC section 42: a locked artifact is a persistent instruction that
+    automation MUST NOT regenerate/replace without confirmation."""
+
+    def test_regenerate_locked_artifact_rejected(self, setup_movie_artifacts, movie_config):
+        """Regenerate on a locked artifact must be rejected, not silently proceed."""
+        store = setup_movie_artifacts
+        store.set_lock("keyframe_1", True)
+
+        event = {
+            "event_id": "evt_regen_locked",
+            "type": "regenerate",
+            "artifact_id": "keyframe_1",
+            "payload": {},
+            "config": movie_config,
+        }
+
+        result = handle_event(event, store)
+
+        assert result["ok"] is False
+        assert "locked" in result["error"].lower()
+
+        # No job created, artifact status untouched.
+        artifact = store.get_artifact("keyframe_1")
+        assert artifact["status"] == "draft"
+        assert store.list_jobs_by_status("queued") == []
+
+    def test_revise_locked_generation_artifact_rejected(self, setup_movie_artifacts, movie_config):
+        """Revise on a locked image/video artifact (which creates a job) must
+        also be rejected."""
+        store = setup_movie_artifacts
+        store.set_lock("clip_1", True)
+
+        event = {
+            "event_id": "evt_revise_locked",
+            "type": "revise",
+            "artifact_id": "clip_1",
+            "payload": {"note": "make it darker"},
+            "config": movie_config,
+        }
+
+        result = handle_event(event, store)
+
+        assert result["ok"] is False
+        assert "locked" in result["error"].lower()
+        assert store.list_jobs_by_status("queued") == []
+
+
+class TestBudgetEnforcement:
+    """SPEC section 39: budget limits MUST be enforced deterministically
+    outside LLM reasoning, at the worker's job-creation call site."""
+
+    def test_regenerate_over_budget_rejected(self, setup_movie_artifacts, movie_config):
+        """A regenerate request whose estimated cost would exceed the
+        configured project budget must be rejected before a job is created."""
+        store = setup_movie_artifacts
+
+        # Movie preset has no budget block; build a minimal config inline
+        # with one, keeping everything else from the real preset so stage
+        # lookups (provider/kind) still resolve correctly.
+        budgeted_config = dict(movie_config)
+        budgeted_config["budget"] = {"project_usd": 0.5}
+
+        event = {
+            "event_id": "evt_regen_over_budget",
+            "type": "regenerate",
+            "artifact_id": "keyframe_1",
+            "payload": {},
+            "config": budgeted_config,
+        }
+        # Smuggle a cost estimate in via payload isn't part of the contract;
+        # the worker computes cost_estimate from the constructed request, so
+        # drive it over budget by pre-existing spend instead: create a prior
+        # succeeded job already at the budget ceiling.
+        store.create_job(
+            artifact_id="keyframe_1",
+            provider="image_default",
+            kind="image",
+            request={},
+            cost_estimate=1.0,
+        )
+        job_before = store.list_jobs_by_status("queued")
+        assert len(job_before) == 1  # the pre-existing job, still queued
+
+        result = handle_event(event, store)
+
+        assert result["ok"] is False
+        assert "budget" in result["error"].lower()
+
+        # No new job was created; artifact status untouched.
+        artifact = store.get_artifact("keyframe_1")
+        assert artifact["status"] == "draft"
+        assert len(store.list_jobs_by_status("queued")) == 1
+
+    def test_regenerate_within_budget_allowed(self, setup_movie_artifacts, movie_config):
+        """A request within budget proceeds normally."""
+        store = setup_movie_artifacts
+
+        budgeted_config = dict(movie_config)
+        budgeted_config["budget"] = {"project_usd": 100.0}
+
+        event = {
+            "event_id": "evt_regen_within_budget",
+            "type": "regenerate",
+            "artifact_id": "keyframe_1",
+            "payload": {},
+            "config": budgeted_config,
+        }
+
+        result = handle_event(event, store)
+
+        assert result["ok"] is True
+        assert "job_id" in result
+        artifact = store.get_artifact("keyframe_1")
+        assert artifact["status"] == "generating"

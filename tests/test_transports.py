@@ -175,6 +175,38 @@ class TestNativeStreamTransportSendEvent:
         transport.close(session)
 
 
+    def test_send_event_times_out_on_hung_worker(self):
+        """A worker subprocess that never responds must not block send_event
+        forever (SPEC section 22: supervisor MUST detect turn timeout)."""
+        hung_worker_command = [
+            sys.executable,
+            "-c",
+            "import sys, time; sys.stdin.readline(); time.sleep(60)",
+        ]
+        transport = NativeStreamTransport(command=hung_worker_command, timeout=1)
+        session = transport.start({"project_id": "test"})
+
+        event_context = {
+            "event_id": "evt_001",
+            "type": "edit",
+            "project_id": "test",
+            "payload": {},
+        }
+
+        import time
+
+        start = time.monotonic()
+        result = transport.send_event(session, event_context)
+        elapsed = time.monotonic() - start
+
+        assert result["ok"] is False
+        assert "timeout" in result["error"].lower()
+        # Bounded by transport.timeout, not blocked indefinitely.
+        assert elapsed < 5
+
+        transport.close(session)
+
+
 class TestNativeStreamTransportInterrupt:
     """Test NativeStreamTransport.interrupt()"""
 

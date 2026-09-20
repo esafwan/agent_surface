@@ -319,8 +319,13 @@ class TestClaimAndDispatch:
 
         supervisor_with_native.stop_worker()
 
-    def test_claim_and_dispatch_worker_failure(self, supervisor_with_native, in_memory_store):
-        """Test claim_and_dispatch when worker returns error."""
+    def test_claim_and_dispatch_worker_failure_retries_before_failing(
+        self, supervisor_with_native, in_memory_store
+    ):
+        """A single transient worker failure MUST NOT permanently kill the
+        event (SPEC section 40: "worker crash before ack: lease expires;
+        event retries"). Below max_attempts, the event is left claimed with
+        its lease intact rather than marked failed."""
         # Create artifact first
         in_memory_store.create_artifact("art_1", "script", "Script 1")
 
@@ -338,7 +343,46 @@ class TestClaimAndDispatch:
         result = supervisor_with_native.claim_and_dispatch_event()
 
         assert result is not None
-        # Event should be marked as failed
+        # First failed attempt: event stays claimed (processing) with a lease,
+        # so it can be retried once the lease expires, rather than being
+        # permanently failed on the very first transient error.
+        updated = in_memory_store.get_event(event["id"])
+        assert updated["status"] == "processing"
+        assert updated["attempt_count"] == 1
+
+        supervisor_with_native.stop_worker()
+
+    def test_claim_and_dispatch_worker_failure_permanent_after_max_attempts(
+        self, supervisor_with_native, in_memory_store
+    ):
+        """After config.max_attempts consecutive failures, the event is
+        permanently failed."""
+        in_memory_store.create_artifact("art_1", "script", "Script 1")
+
+        supervisor_with_native.transport.send_event = Mock(
+            return_value={"ok": False, "error": "Worker error"}
+        )
+        supervisor_with_native.config.max_attempts = 2
+
+        event = in_memory_store.enqueue_event(
+            type="edit",
+            payload={},
+            artifact_id="art_1",
+        )
+
+        # First attempt: retried (left processing).
+        supervisor_with_native.claim_and_dispatch_event()
+        assert in_memory_store.get_event(event["id"])["status"] == "processing"
+
+        # Force the lease to expire so the event becomes claimable again.
+        in_memory_store.conn.execute(
+            "UPDATE events SET lease_until = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (event["id"],),
+        )
+        in_memory_store.conn.commit()
+
+        # Second attempt reaches max_attempts: now permanently failed.
+        supervisor_with_native.claim_and_dispatch_event()
         updated = in_memory_store.get_event(event["id"])
         assert updated["status"] == "failed"
         assert "Worker error" in updated["error"]

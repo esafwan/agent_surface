@@ -1,9 +1,9 @@
 """Mock video generation provider for testing."""
 
-import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from surface.providers.base import Provider
+from surface.providers._mock_common import build_job_id, parse_target
 
 
 class MockVideoProvider(Provider):
@@ -12,7 +12,15 @@ class MockVideoProvider(Provider):
     Similar to MockImageProvider but for video content. Demonstrates proper
     handling of cancellation where late-arriving success must not override
     a cancelled state.
+
+    Per SPEC section 40 ("Poller crash: durable jobs remain; restart and
+    continue"), a fresh provider instance (e.g. after a poller restart) must
+    still be able to answer status() correctly for a job it never saw
+    submit() called for. See `_mock_common` / `MockImageProvider` for the
+    id-encoding approach shared by both mock providers.
     """
+
+    PREFIX = "vid"
 
     def __init__(self, polls_to_success: int = 5):
         """Initialize the mock video provider.
@@ -22,7 +30,7 @@ class MockVideoProvider(Provider):
                             Allows testing of longer polling loops.
         """
         self.polls_to_success = polls_to_success
-        # Maps provider_job_id -> {"status": str, "poll_count": int, "cancelled": bool}
+        # Maps provider_job_id -> {"status": str, "poll_count": int, "cancelled": bool, "target": int}
         self._jobs: Dict[str, Dict[str, Any]] = {}
 
     def submit(self, request: Dict[str, Any]) -> str:
@@ -32,16 +40,42 @@ class MockVideoProvider(Provider):
             request: Dict containing prompt, duration, params, etc.
 
         Returns:
-            provider_job_id: Unique ID for this job.
+            provider_job_id: Unique ID for this job, encoding the
+                polls-to-success target so a restarted provider can resume
+                tracking it correctly.
         """
-        job_id = f"vid_{uuid.uuid4().hex[:8]}"
+        job_id = build_job_id(self.PREFIX, self.polls_to_success)
         self._jobs[job_id] = {
             "status": "queued",
             "poll_count": 0,
             "cancelled": False,
+            "target": self.polls_to_success,
             "request": request,
         }
         return job_id
+
+    def _get_or_init(self, provider_job_id: str) -> Optional[Dict[str, Any]]:
+        """Look up tracking state for a job id, lazily initializing it.
+
+        See MockImageProvider._get_or_init for rationale: this is what lets a
+        poller restart resume and complete an in-flight job.
+        """
+        if provider_job_id in self._jobs:
+            return self._jobs[provider_job_id]
+
+        target = parse_target(provider_job_id, self.PREFIX)
+        if target is None:
+            return None
+
+        job = {
+            "status": "queued",
+            "poll_count": 0,
+            "cancelled": False,
+            "target": target,
+            "request": {},
+        }
+        self._jobs[provider_job_id] = job
+        return job
 
     def status(self, provider_job_id: str) -> str:
         """Check job status, advancing through queued -> running -> succeeded.
@@ -52,10 +86,9 @@ class MockVideoProvider(Provider):
         Returns:
             status: "queued", "running", "succeeded", "failed", or "cancelled".
         """
-        if provider_job_id not in self._jobs:
+        job = self._get_or_init(provider_job_id)
+        if job is None:
             return "failed"
-
-        job = self._jobs[provider_job_id]
 
         # If cancelled, return cancelled state (critical: never override with success)
         if job["cancelled"]:
@@ -68,7 +101,7 @@ class MockVideoProvider(Provider):
 
         if job["status"] == "running":
             job["poll_count"] += 1
-            if job["poll_count"] >= self.polls_to_success:
+            if job["poll_count"] >= job["target"]:
                 job["status"] = "succeeded"
                 return "succeeded"
             return "running"
@@ -84,10 +117,10 @@ class MockVideoProvider(Provider):
         Returns:
             success: True if job was cancelled.
         """
-        if provider_job_id not in self._jobs:
+        job = self._get_or_init(provider_job_id)
+        if job is None:
             return False
 
-        job = self._jobs[provider_job_id]
         if job["status"] in ("succeeded", "failed", "cancelled"):
             return False  # Cannot cancel completed job
 
@@ -104,10 +137,10 @@ class MockVideoProvider(Provider):
         Returns:
             result: Dict with content_ref, content_type, and metadata.
         """
-        if provider_job_id not in self._jobs:
+        job = self._get_or_init(provider_job_id)
+        if job is None:
             return {}
 
-        job = self._jobs[provider_job_id]
         return {
             "content_ref": f"media/video_{provider_job_id}.mp4",
             "content_type": "video/mp4",

@@ -28,6 +28,7 @@ import argparse
 from typing import Any, Dict, Optional
 
 from surface.store import Store
+from surface.stages.config import StageConfig, StageConfigError
 
 
 def handle_event(event: Dict[str, Any], store: Store) -> Dict[str, Any]:
@@ -228,7 +229,17 @@ def _create_generation_job(
     Create a generation job for an artifact.
     Sets artifact status to 'generating' and returns immediately.
     Worker MUST NOT poll for completion (SPEC section 26).
+
+    Per SPEC section 42: a locked artifact ("persistent instruction that
+    automation MUST NOT regenerate/replace without confirmation") MUST NOT
+    be silently regenerated.
+    Per SPEC section 39: budget limits MUST be enforced deterministically
+    outside LLM reasoning, before the job (and its cost) is committed.
     """
+    # S8: reject regeneration of a locked artifact outright.
+    if artifact.get("locked"):
+        return {"ok": False, "error": "artifact is locked"}
+
     try:
         # Get stage config to find provider and kind
         stage_id = artifact["stage"]
@@ -250,12 +261,19 @@ def _create_generation_job(
                 if selected_ver.get("prompt"):
                     request["prompt"] = selected_ver["prompt"]
 
+        # S7: enforce budget limits (SPEC section 39) before creating the job.
+        cost_estimate = float(request.get("cost_estimate", 0.0) or 0.0)
+        budget_error = _check_budget(config, stage_id, cost_estimate, store)
+        if budget_error:
+            return {"ok": False, "error": budget_error}
+
         # Create job (idempotent via source_event_id check would need to be in job creation)
         job = store.create_job(
             artifact_id=artifact_id,
             provider=provider,
             kind=kind,
             request=request,
+            cost_estimate=cost_estimate,
         )
 
         # Set artifact status to 'generating'
@@ -265,6 +283,73 @@ def _create_generation_job(
 
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _check_budget(
+    config: Dict[str, Any],
+    stage_id: str,
+    estimated_cost: float,
+    store: Store,
+) -> Optional[str]:
+    """
+    Validate a prospective job's cost against the stage config's budget
+    block via StageConfig.validate_budget_limit, if a budget is configured.
+
+    Per SPEC section 39: "Budget limits MUST be enforced deterministically
+    outside LLM reasoning." This is the deterministic enforcement point,
+    called before store.create_job() for any generation job.
+
+    Returns an error message string if the job should be rejected, or None
+    if it's within budget (or no budget is configured).
+    """
+    if not config or not config.get("budget"):
+        return None
+
+    try:
+        stage_config = StageConfig(config)
+    except StageConfigError:
+        # Config isn't a valid/complete StageConfig payload; nothing to
+        # enforce against deterministically, so don't block on it.
+        return None
+
+    current_project_cost = _sum_job_costs(store, stage_id=None)
+    current_stage_cost = _sum_job_costs(store, stage_id=stage_id, config=config)
+
+    result = stage_config.validate_budget_limit(
+        estimated_cost=estimated_cost,
+        current_project_cost=current_project_cost,
+        current_stage_cost=current_stage_cost,
+        stage_id=stage_id,
+    )
+
+    if result.get("exceeds_project_budget"):
+        return "budget exceeded: project_usd limit would be exceeded"
+    if result.get("exceeds_stage_budget"):
+        return "budget exceeded: stage_usd limit would be exceeded"
+    return None
+
+
+def _sum_job_costs(
+    store: Store,
+    stage_id: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> float:
+    """
+    Sum cost_estimate across all non-cancelled/non-failed jobs, optionally
+    restricted to jobs whose artifact belongs to a given stage.
+
+    Used to compute cumulative project/stage cost for deterministic budget
+    enforcement (SPEC section 39).
+    """
+    total = 0.0
+    for status in ("queued", "running", "succeeded"):
+        for job in store.list_jobs_by_status(status):
+            if stage_id is not None:
+                artifact = store.get_artifact(job["artifact_id"])
+                if not artifact or artifact.get("stage") != stage_id:
+                    continue
+            total += float(job.get("cost_estimate") or 0.0)
+    return total
 
 
 def _handle_select_version(

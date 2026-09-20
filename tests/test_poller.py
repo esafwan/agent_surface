@@ -452,3 +452,61 @@ class TestPollerEdgeCases:
 
         poller_with_empty = Poller(store, {})
         assert poller_with_empty.providers == {}
+
+
+class TestPollerRestartSurvival:
+    """SPEC section 40: 'Poller crash: durable jobs remain; restart and
+    continue.' A fresh Poller + fresh provider instance (same store) must be
+    able to resume and complete a job in flight when the original process
+    that submitted it is gone."""
+
+    def test_restart_with_fresh_provider_completes_inflight_job(self):
+        """Simulate a poller/provider restart mid-flight: a new Poller and a
+        brand-new MockImageProvider instance (no in-memory history of the
+        job) must still be able to drive the job to completion using only
+        the durable store + the provider_job_id encoded on the job row."""
+        store = Store(":memory:")
+        store.create_artifact(id="img_1", stage="keyframes", title="Image")
+
+        # "Before restart": original poller/provider submits the job.
+        original_provider = MockImageProvider(polls_to_success=2)
+        original_poller = Poller(store, {"image": original_provider})
+
+        job = store.create_job(
+            artifact_id="img_1",
+            provider="image",
+            kind="image",
+            request={"prompt": "A sunset"},
+        )
+        job_id = job["id"]
+
+        # Submits the job to the provider; provider_job_id now persisted.
+        original_poller.poll_once()
+        submitted_job = store.get_job(job_id)
+        assert submitted_job["status"] == "running"
+        assert submitted_job["provider_job_id"] is not None
+
+        # "Restart": original_provider/original_poller are discarded (as if
+        # the process crashed); brand new instances take over, sharing only
+        # the durable store.
+        fresh_provider = MockImageProvider(polls_to_success=2)
+        fresh_poller = Poller(store, {"image": fresh_provider})
+
+        # The fresh provider has never seen this provider_job_id before.
+        assert submitted_job["provider_job_id"] not in fresh_provider._jobs
+
+        # Poll enough times to drive it to completion.
+        for _ in range(5):
+            fresh_poller.poll_once()
+            final_job = store.get_job(job_id)
+            if final_job["status"] == "succeeded":
+                break
+
+        final_job = store.get_job(job_id)
+        assert final_job["status"] == "succeeded"
+
+        # A version should have been created and the artifact moved to review.
+        artifact = store.get_artifact("img_1")
+        assert artifact["status"] == "review"
+        versions = store.list_versions("img_1")
+        assert len(versions) == 1

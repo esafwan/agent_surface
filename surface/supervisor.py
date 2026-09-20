@@ -42,6 +42,8 @@ class SupervisorConfig:
         event_batch_size: int = 1,
         recycle_after_events: Optional[int] = None,
         recycle_after_tokens: Optional[int] = None,
+        max_attempts: int = 3,
+        idle_sleep_seconds: float = 0.2,
     ):
         """
         Initialize supervisor configuration.
@@ -53,6 +55,13 @@ class SupervisorConfig:
             event_batch_size: How many events to process per loop (1 = serial).
             recycle_after_events: Recycle worker after this many events.
             recycle_after_tokens: Recycle worker after this many LLM tokens.
+            max_attempts: Consecutive failed dispatch attempts allowed for an
+                event (tracked via the store's attempt_count) before it is
+                permanently failed. Per SPEC section 40, a worker/transport
+                crash before ack should let the lease expire and retry rather
+                than permanently killing the event on the first failure.
+            idle_sleep_seconds: Sleep duration in run_loop when the inbox is
+                empty, to avoid spinning a CPU core at 100%.
         """
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
@@ -60,6 +69,8 @@ class SupervisorConfig:
         self.event_batch_size = event_batch_size
         self.recycle_after_events = recycle_after_events
         self.recycle_after_tokens = recycle_after_tokens
+        self.max_attempts = max_attempts
+        self.idle_sleep_seconds = idle_sleep_seconds
 
 
 class Supervisor:
@@ -276,7 +287,7 @@ class Supervisor:
             if not result.get("ok"):
                 error_msg = result.get("error", "Unknown error")
                 logger.error(f"Worker turn failed for event {event['id']}: {error_msg}")
-                self.store.fail_event(event["id"], error_msg)
+                self._handle_dispatch_failure(event, error_msg)
                 return event
 
             # Worker succeeded; step 8: ack event
@@ -300,11 +311,44 @@ class Supervisor:
 
         except Exception as e:
             logger.error(f"Error processing event {event['id']}: {e}")
+            self._handle_dispatch_failure(event, str(e))
+            return event
+
+    def _handle_dispatch_failure(self, event: Dict[str, Any], error_msg: str) -> None:
+        """
+        Handle a failed dispatch (transport error or worker ok:false).
+
+        Per SPEC section 40: "worker crash before ack: lease expires; event
+        retries." A single transient failure MUST NOT permanently kill the
+        event. `claim_next_event` already incremented `attempt_count` for
+        this claim, so once that count reaches `config.max_attempts` we treat
+        the failure as permanent and call `store.fail_event`. Below that
+        threshold, the store has no public "return to pending now" API, so we
+        deliberately leave the event in its claimed `processing` state with
+        its lease intact: the lease will expire naturally and
+        `claim_next_event` will reset it to `pending` for a future claim,
+        which is the retry path.
+
+        Args:
+            event: The event dict as returned by claim_next_event (contains
+                the post-increment attempt_count).
+            error_msg: Error description for logging/eventual fail_event call.
+        """
+        attempt_count = event.get("attempt_count") or 0
+        if attempt_count >= self.config.max_attempts:
+            logger.error(
+                f"Event {event['id']} failed {attempt_count} times "
+                f"(max_attempts={self.config.max_attempts}); permanently failing"
+            )
             try:
-                self.store.fail_event(event["id"], str(e))
+                self.store.fail_event(event["id"], error_msg)
             except Exception as ex:
                 logger.error(f"Failed to mark event as failed: {ex}")
-            return event
+        else:
+            logger.warning(
+                f"Event {event['id']} failed (attempt {attempt_count}/"
+                f"{self.config.max_attempts}); leaving lease to expire for retry"
+            )
 
     def run_loop(self, max_iterations: Optional[int] = None) -> None:
         """
@@ -315,10 +359,16 @@ class Supervisor:
         Args:
             max_iterations: Max number of claim/dispatch cycles (None = infinite).
         """
+        import time
+
         iteration = 0
         try:
             while max_iterations is None or iteration < max_iterations:
-                self.claim_and_dispatch_event()
+                event = self.claim_and_dispatch_event()
+                if event is None:
+                    # Inbox empty (or worker failed to start): avoid spinning
+                    # a CPU core at 100% while idle.
+                    time.sleep(self.config.idle_sleep_seconds)
                 iteration += 1
         except KeyboardInterrupt:
             logger.info("Supervisor loop interrupted")
