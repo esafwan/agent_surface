@@ -1,0 +1,49 @@
+{
+  "schema_version": "1",
+  "id": "movie",
+  "title": "Movie Pipeline",
+  "stages": [
+    {
+      "id": "script",
+      "artifact_type": "text",
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true
+    },
+    {
+      "id": "shots",
+      "artifact_type": "text",
+      "depends_on": ["script"],
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true
+    },
+    {
+      "id": "keyframes",
+      "artifact_type": "image",
+      "depends_on": ["shots"],
+      "allowed_actions": ["regenerate", "revise", "select_version", "approve", "cancel"],
+      "generation": {
+        "provider": "image_default",
+        "max_parallel": 4
+      }
+    },
+    {
+      "id": "clips",
+      "artifact_type": "video",
+      "depends_on": ["keyframes"],
+      "allowed_actions": ["regenerate", "revise", "select_version", "approve", "cancel"],
+      "generation": {
+        "provider": "video_default",
+        "max_parallel": 2
+      }
+    },
+    {
+      "id": "assembly",
+      "artifact_type": "video",
+      "depends_on": ["clips"],
+      "allowed_actions": ["regenerate", "approve", "reopen"]
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["script", "shots", "keyframes", "clips", "assembly"]
+  }
+}
