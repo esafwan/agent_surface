@@ -472,6 +472,36 @@ class SurfaceCLI:
 
         self._json_output(result)
 
+    def tui(self) -> None:
+        """Launch the interactive stdlib-only terminal board (SPEC section 58).
+
+        Unlike the Gradio board, this renderer has no external dependency and
+        runs directly against the real terminal (sys.stdin/sys.stdout) --
+        it is a full alternative renderer, not a JSON-output subcommand, so
+        it does not follow the JSON-to-stdout convention the rest of the CLI
+        uses.
+        """
+        store = self.get_store()
+        if not store:
+            self._error(f"No store at {self.db_path}. Use 'surface init' first.")
+            return
+
+        cursor = store.conn.cursor()
+        cursor.execute("SELECT value_json FROM kv_state WHERE key = ?", ("stage_config",))
+        row = cursor.fetchone()
+        if not row:
+            self._error("No stage config found in store")
+            return
+
+        try:
+            stage_config = StageConfig(json.loads(row[0]))
+        except Exception as e:
+            self._error(f"Invalid stage config: {e}")
+            return
+
+        from surface.tui import run_tui
+        run_tui(store, stage_config)
+
     # =========================================================================
     # Runtime Directory (SPEC section 9)
     # =========================================================================
@@ -1333,6 +1363,10 @@ def main():
 
     status_parser = subparsers.add_parser("status", help="Get project status")
 
+    tui_parser = subparsers.add_parser(
+        "tui", help="Launch the interactive stdlib-only terminal board (no gradio required)"
+    )
+
     serve_parser = subparsers.add_parser(
         "serve", help="Start the board runtime (store, supervisor, poller, board)"
     )
@@ -1514,6 +1548,9 @@ def main():
 
     elif args.command == "status":
         cli.status()
+
+    elif args.command == "tui":
+        cli.tui()
 
     elif args.command == "serve":
         cli.serve(

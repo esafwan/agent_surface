@@ -1107,6 +1107,38 @@ class TestInterruptCommand:
         assert output["likely_running"] is False
 
 
+class TestTuiCommand:
+    """Tests for `surface tui` (Phase 3: stdlib/non-gradio renderer)."""
+
+    def test_tui_without_store_errors_cleanly(self, cli_with_temp_db, capsys):
+        cli = cli_with_temp_db
+        cli.tui()
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.strip() != ""
+
+    def test_tui_runs_against_a_real_initialized_store(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """End-to-end: cli.tui() loads the stage config from kv_state (the
+        same path `init` writes and `serve` reads) and drives a real
+        run_tui() session against it, with no gradio import anywhere in the
+        chain."""
+        db_path = str(tmp_path / ".surface-board" / "state.sqlite3")
+        cli = SurfaceCLI(db_path=db_path)
+        cli.init(stage="movie", db=db_path)
+        capsys.readouterr()  # discard init's JSON output
+
+        store = cli.get_store()
+        store.create_artifact(id="script_001", stage="script", title="Script")
+
+        monkeypatch.setattr("sys.stdin", StringIO("list\nquit\n"))
+        cli.tui()
+        captured = capsys.readouterr()
+        assert "script_001" in captured.out
+        assert "Goodbye" in captured.out
+
+
 class TestRenderWaitCommands:
     """Tests for `surface render` + `surface wait` (SPEC section 35)."""
 
