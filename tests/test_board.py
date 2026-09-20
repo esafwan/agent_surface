@@ -18,6 +18,12 @@ from surface.board import (
     StageDisplayGroup,
     BoardDisplayModel,
     render_version_content,
+    describe_select_version_conflict,
+    BOARD_CSS,
+    format_artifact_meta,
+    format_status_badge,
+    format_version_line,
+    content_textbox_lines,
 )
 
 
@@ -1047,6 +1053,97 @@ def test_select_version_conflict_returns_current_state(populated_store, stage_co
 
 
 # =============================================================================
+# Conflict UX (Phase 1 hardening): SPEC section 56, 41, 33 - conflicts must
+# be surfaced to the user, not silently dropped, and must not clobber state.
+# =============================================================================
+
+
+def test_select_version_conflict_via_board_handler_no_state_change(populated_store, stage_config):
+    """
+    A stale expected_selected_version_id, submitted through the board's
+    actual ActionHandler (not store.py directly), must:
+      - produce a conflict result,
+      - include the actual current selected version id, and
+      - leave selected_version_id unchanged (no side effect on conflict).
+    """
+    handler = ActionHandler(populated_store, stage_config)
+
+    versions = populated_store.list_versions("keyframe_001")
+    v1_id = versions[0]["id"]
+    v2_id = versions[1]["id"]
+
+    # Establish a known current selection: v2.
+    ok_result = handler.select_version("keyframe_001", v2_id, expected_selected_version_id=v1_id)
+    assert ok_result["ok"] is True
+
+    artifact_before = populated_store.get_artifact("keyframe_001")
+    assert artifact_before["selected_version_id"] == v2_id
+
+    # Stale browser submission: still believes v1 is selected, tries to
+    # select v1 again "expecting" v1 (its cached state), but the real
+    # current selection is now v2 -> conflict.
+    conflict_result = handler.select_version(
+        "keyframe_001", v1_id, expected_selected_version_id=v1_id
+    )
+
+    assert conflict_result["ok"] is False
+    assert conflict_result["error"] == "conflict"
+    assert conflict_result["current_selected_version_id"] == v2_id
+
+    # No side effect: selection must remain v2, not silently move to v1.
+    artifact_after = populated_store.get_artifact("keyframe_001")
+    assert artifact_after["selected_version_id"] == v2_id
+
+
+def test_select_version_happy_path_unaffected_by_conflict_handling(populated_store, stage_config):
+    """A matching expected_selected_version_id still succeeds and applies."""
+    handler = ActionHandler(populated_store, stage_config)
+
+    versions = populated_store.list_versions("keyframe_001")
+    v1_id = versions[0]["id"]
+    v2_id = versions[1]["id"]
+
+    artifact = populated_store.get_artifact("keyframe_001")
+    assert artifact["selected_version_id"] == v1_id
+
+    result = handler.select_version("keyframe_001", v2_id, expected_selected_version_id=v1_id)
+    assert result["ok"] is True
+    assert result.get("error") is None
+
+    artifact_after = populated_store.get_artifact("keyframe_001")
+    assert artifact_after["selected_version_id"] == v2_id
+
+    # No conflict message should be produced for a successful result.
+    assert describe_select_version_conflict(result) is None
+
+
+def test_describe_select_version_conflict_message_includes_current_version():
+    """The UI-facing conflict message must name the actual current version."""
+    result = {
+        "ok": False,
+        "error": "conflict",
+        "current_selected_version_id": "ver_91",
+        "stale_descendants": [],
+    }
+    message = describe_select_version_conflict(result)
+    assert message is not None
+    assert "ver_91" in message
+    assert "conflict" in message.lower()
+    assert "refresh" in message.lower()
+
+
+def test_describe_select_version_conflict_returns_none_for_success():
+    result = {"ok": True, "selected_version_id": "ver_91", "stale_descendants": []}
+    assert describe_select_version_conflict(result) is None
+
+
+def test_describe_select_version_conflict_returns_none_for_other_errors():
+    """Non-conflict errors (e.g. gating failures) must not be mislabeled."""
+    result = {"ok": False, "error": "Action select_version not allowed for stage script"}
+    assert describe_select_version_conflict(result) is None
+
+
+# =============================================================================
 # Issue 5: Action Gating Tests (M3, M4)
 # =============================================================================
 
@@ -1198,3 +1295,89 @@ def test_render_version_content_invoked_in_board_display():
     content_type, value = render_version_content(version)
     assert content_type == "image"
     assert value == "media/test.jpg"
+
+
+# =============================================================================
+# Presentation helper tests (no gradio required)
+# =============================================================================
+
+
+def test_board_css_is_non_empty_stylesheet():
+    """BOARD_CSS should be real CSS, not an empty placeholder."""
+    assert isinstance(BOARD_CSS, str)
+    assert len(BOARD_CSS.strip()) > 200
+    # Every class referenced by the layout must actually be styled.
+    for selector in (
+        ".gradio-container",
+        "#board-header",
+        ".artifact-card",
+        ".artifact-meta",
+        ".content-surface",
+        ".version-row",
+        ".action-bar",
+    ):
+        assert selector in BOARD_CSS, f"missing style for {selector}"
+    # Balanced braces => syntactically plausible stylesheet.
+    assert BOARD_CSS.count("{") == BOARD_CSS.count("}")
+
+
+def test_format_artifact_meta_is_single_line_with_key_fields():
+    card = ArtifactDisplayCard(
+        artifact_id="a1",
+        stage="script",
+        title="Opening scene",
+        status="approved",
+        locked=True,
+        selected_version=VersionDisplayRow(version_id="v2", version_num=2),
+        all_versions=[
+            VersionDisplayRow(version_id="v1", version_num=1),
+            VersionDisplayRow(version_id="v2", version_num=2, is_selected=True),
+        ],
+        has_generating_job=True,
+    )
+    meta = format_artifact_meta(card)
+    assert "\n" not in meta
+    assert "**Status:**" in meta and "approved" in meta
+    assert "**Version:** 2" in meta
+    assert "**Stage:** script" in meta
+    assert "locked" in meta
+    assert "generating" in meta
+
+
+def test_format_artifact_meta_minimal_card():
+    card = ArtifactDisplayCard(
+        artifact_id="a1", stage="script", title="T", status="draft", locked=False
+    )
+    meta = format_artifact_meta(card)
+    assert "**Stage:** script" in meta
+    assert "locked" not in meta
+    assert "Version:" not in meta
+
+
+def test_format_status_badge_has_dot_and_label():
+    assert "approved" in format_status_badge("approved")
+    assert format_status_badge("approved") != "approved"
+    # Unknown statuses still render.
+    assert "weird" in format_status_badge("weird")
+
+
+def test_format_version_line_marks_selection_and_truncates_note():
+    selected = VersionDisplayRow(
+        version_id="v2", version_num=2, created_by="worker",
+        created_at="2024-01-01", note="x" * 100, is_selected=True,
+    )
+    line = format_version_line(selected)
+    assert line.startswith("●")
+    assert "**v2**" in line
+    assert "..." in line
+    assert "\n" not in line
+
+    other = format_version_line(VersionDisplayRow(version_id="v1", version_num=1))
+    assert other.startswith("○")
+
+
+def test_content_textbox_lines_bounds():
+    assert content_textbox_lines(None) == 4
+    assert content_textbox_lines("short") == 8
+    assert content_textbox_lines("line\n" * 200) == 28
+    assert 8 <= content_textbox_lines("word " * 400) <= 28

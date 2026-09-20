@@ -605,6 +605,213 @@ def render_version_content(version_row: VersionDisplayRow) -> Tuple[str, Optiona
         return ("text", f"[{content_type}] {version_row.content_ref or version_row.content}")
 
 
+def describe_select_version_conflict(result: Dict[str, Any]) -> Optional[str]:
+    """
+    Build a user-facing conflict message for a select_version result.
+
+    Per SPEC section 41 (Selection Conflicts): if the caller's
+    expected_selected_version_id no longer matches the artifact's current
+    selection, the store/handler layer returns a conflict (ok=False,
+    error="conflict", current_selected_version_id=<actual current>) instead
+    of silently overwriting a newer selection. This helper turns that
+    conflict shape into a message the UI can surface directly (e.g. in a
+    status/message textbox), so the conflict is never silently swallowed.
+
+    Returns None when `result` is not a select_version conflict (i.e. the
+    action succeeded, or failed for some other reason such as gating).
+    """
+    if result.get("ok"):
+        return None
+    if result.get("error") != "conflict":
+        return None
+    current = result.get("current_selected_version_id")
+    return (
+        f"Selection conflict: another version was selected since you loaded "
+        f"this view (current: {current}). Refresh to see the latest state "
+        f"before retrying."
+    )
+
+
+# =============================================================================
+# Presentation helpers (pure, no gradio dependency)
+# =============================================================================
+
+
+BOARD_CSS = """
+/* --- Agent Surface board: tighten Gradio's defaults into a review tool --- */
+
+.gradio-container {
+  max-width: 1080px !important;
+  margin: 0 auto !important;
+  font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Gradio stacks generous gaps everywhere; pull them in globally. */
+.gradio-container .gap { gap: 8px !important; }
+.gradio-container .form { gap: 8px !important; }
+
+/* Top bar: project name + live status on one compact line. */
+#board-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border-color-primary);
+  padding: 4px 0 10px 0;
+  margin-bottom: 4px;
+}
+#board-header .prose h1,
+#board-header .prose h2 { margin: 0 !important; }
+.board-title p, .board-title h1, .board-title h2 {
+  margin: 0 !important;
+  font-size: 17px !important;
+  font-weight: 650 !important;
+  letter-spacing: -0.01em;
+}
+.board-status p {
+  margin: 0 !important;
+  text-align: right;
+  font-size: 12.5px !important;
+  color: var(--body-text-color-subdued);
+}
+
+/* Artifact card: one light container per artifact, not per field. */
+.artifact-card {
+  border: 1px solid var(--border-color-primary) !important;
+  border-radius: 10px !important;
+  padding: 14px 16px 12px 16px !important;
+  margin-bottom: 14px !important;
+  background: var(--background-fill-primary) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.artifact-title p, .artifact-title h3 {
+  margin: 0 0 2px 0 !important;
+  font-size: 15.5px !important;
+  font-weight: 650 !important;
+  line-height: 1.3;
+}
+/* The metadata line: small, single row, never its own boxed section. */
+.artifact-meta p {
+  margin: 0 0 10px 0 !important;
+  font-size: 12px !important;
+  color: var(--body-text-color-subdued);
+  line-height: 1.5;
+}
+.artifact-meta strong { font-weight: 600; color: var(--body-text-color); }
+
+/* The review surface itself: the thing the page exists for. */
+.content-surface textarea {
+  font-size: 15px !important;
+  line-height: 1.6 !important;
+  border: none !important;
+  box-shadow: none !important;
+  background: var(--background-fill-secondary) !important;
+  padding: 12px 14px !important;
+  border-radius: 8px !important;
+  resize: vertical;
+}
+.content-surface .prose {
+  font-size: 15px !important;
+  line-height: 1.6 !important;
+  padding: 12px 14px !important;
+  background: var(--background-fill-secondary);
+  border-radius: 8px;
+}
+.content-surface { margin-bottom: 8px !important; }
+
+/* Version history rows: a compact list, one line each. */
+.version-row { align-items: center !important; margin: 0 !important; }
+.version-line p {
+  margin: 0 !important;
+  font-size: 12.5px !important;
+  color: var(--body-text-color-subdued);
+}
+.version-line strong { color: var(--body-text-color); }
+
+/* Action bar at the foot of each card. */
+.action-bar {
+  margin-top: 10px !important;
+  padding-top: 10px !important;
+  border-top: 1px solid var(--border-color-primary);
+  flex-wrap: wrap;
+}
+.action-bar button { min-height: 32px !important; }
+
+.subtle-note p {
+  margin: 0 !important;
+  font-size: 12px !important;
+  color: var(--body-text-color-subdued);
+  font-style: italic;
+}
+
+footer { display: none !important; }
+"""
+
+
+_STATUS_DOTS = {
+    "approved": "🟢",
+    "review": "🟡",
+    "generating": "🔵",
+    "stale": "🟠",
+    "failed": "🔴",
+    "cancelled": "⚪",
+    "draft": "⚪",
+}
+
+
+def format_status_badge(status: str) -> str:
+    """Render a status as a small inline badge (dot + label)."""
+    dot = _STATUS_DOTS.get(status, "⚪")
+    return f"{dot} {status}"
+
+
+def format_artifact_meta(card: ArtifactDisplayCard) -> str:
+    """
+    Build the single-line metadata row for an artifact card.
+
+    All of status / version / stage / lock / generating / stale collapse into
+    one small markdown line rather than one boxed section each.
+    """
+    parts = [f"**Status:** {format_status_badge(card.status)}"]
+    if card.selected_version:
+        parts.append(f"**Version:** {card.selected_version.version_num}")
+    if card.all_versions:
+        parts.append(f"**Versions:** {len(card.all_versions)}")
+    parts.append(f"**Stage:** {card.stage}")
+    if card.locked:
+        parts.append("🔒 locked")
+    if card.has_generating_job:
+        parts.append("⚙️ generating")
+    if card.status == "stale" or card.stale_reason:
+        parts.append("⚠️ stale")
+    return " &nbsp;·&nbsp; ".join(parts)
+
+
+def format_version_line(version: VersionDisplayRow) -> str:
+    """Build the compact one-line description of a version in the history list."""
+    marker = "●" if version.is_selected else "○"
+    bits = [f"{marker} **v{version.version_num}**"]
+    if version.created_by:
+        bits.append(version.created_by)
+    if version.created_at:
+        bits.append(version.created_at)
+    if version.note:
+        note = version.note if len(version.note) <= 60 else version.note[:57] + "..."
+        bits.append(note)
+    return " · ".join(bits)
+
+
+def content_textbox_lines(content: Optional[str]) -> int:
+    """
+    Pick a sensible height for the content review surface.
+
+    The content is the point of the page, so it gets real vertical space,
+    but never so much that a long script pushes the actions off-screen.
+    """
+    if not content:
+        return 4
+    newline_estimate = content.count("\n") + 1
+    wrap_estimate = len(content) // 90 + 1
+    return max(8, min(28, max(newline_estimate, wrap_estimate) + 1))
+
+
 # =============================================================================
 # Gradio Board Wiring (conditional on gradio availability)
 # =============================================================================
@@ -648,7 +855,10 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
     def refresh_board() -> Tuple[str, str, str]:
         """Refresh board state from store."""
         display = display_builder.build_board_display()
-        title = f"{stage_config.title} ({display.pending_review_count} pending)"
+        title = (
+            f"{stage_config.title} &nbsp;·&nbsp; "
+            f"{display.pending_review_count} pending review"
+        )
         status = display.status_message
         artifacts_json = json.dumps(display.to_dict(), indent=2)
         return title, status, artifacts_json
@@ -659,10 +869,24 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
         result = action_handler.approve(artifact_id, force=force)
         return json.dumps(result)
 
-    def handle_select_version(artifact_id: str, version_id: str, expected_selected_version_id: Optional[str] = None) -> str:
-        """Handle select_version action with optimistic concurrency."""
+    def handle_select_version(
+        artifact_id: str, version_id: str, expected_selected_version_id: Optional[str] = None
+    ) -> Tuple[str, str]:
+        """
+        Handle select_version action with optimistic concurrency.
+
+        On conflict (stale expected_selected_version_id), no side effect is
+        applied at the data layer (verified in store.select_version /
+        ActionHandler.select_version) and the conflict is surfaced to the
+        user via the status textbox instead of failing silently.
+        """
         result = action_handler.select_version(artifact_id, version_id, expected_selected_version_id)
-        return json.dumps(result)
+        conflict_message = describe_select_version_conflict(result)
+        if conflict_message:
+            status_text = conflict_message
+        else:
+            status_text = display_builder.build_board_display().status_message
+        return json.dumps(result), status_text
 
     def handle_lock_artifact(artifact_id: str) -> str:
         """Handle lock action."""
@@ -709,289 +933,281 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
     with gr.Blocks(
         title=f"{stage_config.title} - Agent Surface Board",
         theme=gr.themes.Soft(),
+        css=BOARD_CSS,
     ) as demo:
-        gr.Markdown(f"# {stage_config.title}")
+        # Single hidden sink for action results (JSON). Keeps every handler's
+        # return value wired somewhere without adding visible chrome.
+        action_sink = gr.Textbox(visible=False, label="result")
 
-        with gr.Row():
-            title_display = gr.Textbox(
-                value=f"{stage_config.title} ({board_display.pending_review_count} pending)",
-                label="Project",
-                interactive=False,
+        # --- Compact header bar: project on the left, live status on the right.
+        with gr.Row(elem_id="board-header"):
+            title_display = gr.Markdown(
+                value=f"{stage_config.title} &nbsp;·&nbsp; {board_display.pending_review_count} pending review",
+                elem_classes=["board-title"],
             )
-            status_display = gr.Textbox(
+            status_display = gr.Markdown(
                 value=board_display.status_message,
-                label="Status",
-                interactive=False,
+                elem_classes=["board-status"],
+            )
+            btn_refresh = gr.Button(
+                "Refresh", variant="secondary", size="sm", scale=0, min_width=90
             )
 
-        # Tab for each stage
+        # --- One tab per stage.
         with gr.Tabs():
             for stage_group in board_display.stages:
-                with gr.Tab(label=stage_group.stage_id):
-                    gr.Markdown(f"## {stage_group.stage_title}")
+                tab_label = (
+                    f"{stage_group.stage_title} ({stage_group.approved_count}/{stage_group.total_count})"
+                    if stage_group.total_count
+                    else stage_group.stage_title
+                )
+                with gr.Tab(label=tab_label):
+                    if not stage_group.artifacts:
+                        gr.Markdown(
+                            "_No artifacts in this stage yet._",
+                            elem_classes=["subtle-note"],
+                        )
+                        continue
 
-                    if stage_group.artifacts:
-                        for artifact_card in stage_group.artifacts:
-                            with gr.Group():
+                    for artifact_card in stage_group.artifacts:
+                        artifact_state = gr.State(artifact_card.artifact_id)
+
+                        with gr.Column(elem_classes=["artifact-card"]):
+                            # Title + one-line metadata badge row.
+                            gr.Markdown(
+                                f"### {artifact_card.title}",
+                                elem_classes=["artifact-title"],
+                            )
+                            gr.Markdown(
+                                format_artifact_meta(artifact_card),
+                                elem_classes=["artifact-meta"],
+                            )
+
+                            # --- The review surface: the dominant element.
+                            if artifact_card.selected_version:
+                                sel_ver = artifact_card.selected_version
+                                content_kind, content_value = render_version_content(sel_ver)
+
+                                if content_kind == "image":
+                                    resolved_path = _resolve_media_path(content_value)
+                                    if resolved_path:
+                                        gr.Image(
+                                            value=resolved_path,
+                                            show_label=False,
+                                            interactive=False,
+                                            height=460,
+                                            elem_classes=["content-surface"],
+                                        )
+                                elif content_kind == "video":
+                                    resolved_path = _resolve_media_path(content_value)
+                                    if resolved_path:
+                                        gr.Video(
+                                            value=resolved_path,
+                                            show_label=False,
+                                            interactive=False,
+                                            height=460,
+                                            elem_classes=["content-surface"],
+                                        )
+                                elif content_kind == "audio":
+                                    resolved_path = _resolve_media_path(content_value)
+                                    if resolved_path:
+                                        gr.Audio(
+                                            value=resolved_path,
+                                            show_label=False,
+                                            interactive=False,
+                                            elem_classes=["content-surface"],
+                                        )
+                                elif content_kind == "text" and content_value:
+                                    lines = content_textbox_lines(content_value)
+                                    gr.Textbox(
+                                        value=content_value,
+                                        show_label=False,
+                                        container=False,
+                                        interactive=False,
+                                        lines=lines,
+                                        max_lines=lines,
+                                        elem_classes=["content-surface"],
+                                    )
+
+                                # Prompt / note stay secondary: collapsed by default.
+                                if sel_ver.prompt or sel_ver.note:
+                                    with gr.Accordion("Prompt & notes", open=False):
+                                        if sel_ver.prompt:
+                                            gr.Markdown(f"**Prompt** — {sel_ver.prompt}")
+                                        if sel_ver.note:
+                                            gr.Markdown(f"**Note** — {sel_ver.note}")
+                            else:
                                 gr.Markdown(
-                                    f"### {artifact_card.title} "
-                                    f"[{artifact_card.status}]"
+                                    "_No version selected yet._",
+                                    elem_classes=["subtle-note"],
                                 )
 
-                                with gr.Row():
-                                    status_badge = gr.Label(
-                                        value=artifact_card.status,
-                                        label="Status",
-                                    )
-                                    if artifact_card.locked:
-                                        gr.Label(value="🔒 Locked")
-                                    if artifact_card.has_generating_job:
-                                        gr.Label(value="⚙️ Generating")
-                                    if artifact_card.status == "stale":
-                                        gr.Label(value="⚠️ Stale")
-
-                                # Selected version display (with media rendering)
-                                if artifact_card.selected_version:
-                                    sel_ver = artifact_card.selected_version
-                                    with gr.Group():
-                                        gr.Markdown("#### Selected Version")
-                                        gr.Textbox(
-                                            value=f"Version {sel_ver.version_num}",
-                                            label="Version",
-                                            interactive=False,
-                                        )
-
-                                        # Render version content based on type
-                                        content_type, content_value = render_version_content(sel_ver)
-                                        if content_type == "image":
-                                            resolved_path = _resolve_media_path(content_value)
-                                            if resolved_path:
-                                                gr.Image(
-                                                    value=resolved_path,
-                                                    label="Image Content",
+                            # --- Version history: a compact collapsed list.
+                            if (
+                                len(artifact_card.all_versions) > 1
+                                and "select_version" in artifact_card.allowed_actions
+                            ):
+                                current_selection = (
+                                    artifact_card.selected_version.version_id
+                                    if artifact_card.selected_version
+                                    else ""
+                                )
+                                with gr.Accordion(
+                                    f"Version history ({len(artifact_card.all_versions)})",
+                                    open=False,
+                                ):
+                                    for version in artifact_card.all_versions:
+                                        with gr.Row(elem_classes=["version-row"]):
+                                            gr.Markdown(
+                                                format_version_line(version),
+                                                elem_classes=["version-line"],
+                                            )
+                                            if version.is_selected:
+                                                gr.Button(
+                                                    "Selected",
+                                                    variant="secondary",
+                                                    size="sm",
                                                     interactive=False,
-                                                )
-                                        elif content_type == "video":
-                                            resolved_path = _resolve_media_path(content_value)
-                                            if resolved_path:
-                                                gr.Video(
-                                                    value=resolved_path,
-                                                    label="Video Content",
-                                                    interactive=False,
-                                                )
-                                        elif content_type == "audio":
-                                            resolved_path = _resolve_media_path(content_value)
-                                            if resolved_path:
-                                                gr.Audio(
-                                                    value=resolved_path,
-                                                    label="Audio Content",
-                                                    interactive=False,
-                                                )
-                                        elif content_type == "text" and content_value:
-                                            # Show text content
-                                            if len(content_value) > 500:
-                                                gr.Textbox(
-                                                    value=content_value,
-                                                    label="Content",
-                                                    interactive=False,
-                                                    lines=8,
+                                                    scale=0,
+                                                    min_width=88,
                                                 )
                                             else:
-                                                gr.Textbox(
-                                                    value=content_value,
-                                                    label="Content",
-                                                    interactive=False,
+                                                btn_select = gr.Button(
+                                                    "Select",
+                                                    variant="secondary",
+                                                    size="sm",
+                                                    scale=0,
+                                                    min_width=88,
+                                                )
+                                                btn_select.click(
+                                                    handle_select_version,
+                                                    inputs=[
+                                                        artifact_state,
+                                                        gr.State(version.version_id),
+                                                        gr.State(current_selection),
+                                                    ],
+                                                    # Result to the hidden sink; any
+                                                    # conflict message to the visible
+                                                    # status line (SPEC section 41:
+                                                    # conflicts must be surfaced).
+                                                    outputs=[action_sink, status_display],
                                                 )
 
-                                        if sel_ver.prompt:
-                                            gr.Textbox(
-                                                value=sel_ver.prompt,
-                                                label="Prompt",
-                                                interactive=False,
-                                            )
-                                        if sel_ver.note:
-                                            gr.Textbox(
-                                                value=sel_ver.note,
-                                                label="Note",
-                                                interactive=False,
-                                            )
-
-                                # Version history (gated on select_version in allowed_actions)
-                                if len(artifact_card.all_versions) > 1 and "select_version" in artifact_card.allowed_actions:
-                                    with gr.Group():
-                                        gr.Markdown("#### Version History")
-                                        for version in artifact_card.all_versions:
-                                            with gr.Row():
-                                                gr.Textbox(
-                                                    value=f"v{version.version_num}",
-                                                    scale=1,
-                                                    interactive=False,
-                                                )
-                                                # Only show select button if action is allowed and version is not already selected
-                                                if not version.is_selected:
-                                                    btn_select = gr.Button(
-                                                        "Select",
-                                                        scale=1,
-                                                    )
-                                                    # Pass expected_selected_version_id from current display state
-                                                    btn_select.click(
-                                                        handle_select_version,
-                                                        inputs=[
-                                                            gr.Textbox(
-                                                                value=artifact_card.artifact_id,
-                                                                visible=False,
-                                                            ),
-                                                            gr.Textbox(
-                                                                value=version.version_id,
-                                                                visible=False,
-                                                            ),
-                                                            gr.Textbox(
-                                                                value=artifact_card.selected_version.version_id if artifact_card.selected_version else "",
-                                                                visible=False,
-                                                            ),
-                                                        ],
-                                                        outputs=gr.Textbox(visible=False),
-                                                    )
-                                                else:
-                                                    gr.Button(
-                                                        "Selected",
-                                                        scale=1,
-                                                        interactive=False,
-                                                    )
-
-                                # Action buttons
+                            # --- Inputs for text edits / revision notes.
+                            if "edit" in artifact_card.allowed_actions:
                                 with gr.Row():
-                                    # Approve button (gated on allowed_actions and not locked)
-                                    if "approve" in artifact_card.allowed_actions:
-                                        approve_label = "Approve (Locked)" if artifact_card.locked else "Approve"
-                                        btn_approve = gr.Button(
-                                            approve_label,
-                                            interactive=not artifact_card.locked,
-                                        )
-                                        btn_approve.click(
-                                            handle_approve_artifact,
-                                            inputs=[
-                                                gr.Textbox(
-                                                    value=artifact_card.artifact_id,
-                                                    visible=False,
-                                                ),
-                                                gr.Checkbox(
-                                                    value=False,
-                                                    visible=False,
-                                                ),
-                                            ],
-                                            outputs=gr.Textbox(visible=False),
-                                        )
+                                    edit_content = gr.Textbox(
+                                        show_label=False,
+                                        container=False,
+                                        placeholder="Replace content…",
+                                        lines=2,
+                                        scale=5,
+                                    )
+                                    btn_edit = gr.Button(
+                                        "Update", variant="secondary", size="sm",
+                                        scale=0, min_width=96,
+                                    )
+                                    btn_edit.click(
+                                        handle_edit_artifact,
+                                        inputs=[artifact_state, edit_content],
+                                        outputs=action_sink,
+                                    )
 
-                                    if "lock" in artifact_card.allowed_actions:
-                                        btn_lock = gr.Button(
-                                            "Unlock" if artifact_card.locked else "Lock"
-                                        )
-                                        if artifact_card.locked:
-                                            btn_lock.click(
-                                                handle_unlock_artifact,
-                                                inputs=gr.Textbox(
-                                                    value=artifact_card.artifact_id,
-                                                    visible=False,
-                                                ),
-                                                outputs=gr.Textbox(visible=False),
-                                            )
-                                        else:
-                                            btn_lock.click(
-                                                handle_lock_artifact,
-                                                inputs=gr.Textbox(
-                                                    value=artifact_card.artifact_id,
-                                                    visible=False,
-                                                ),
-                                                outputs=gr.Textbox(visible=False),
-                                            )
+                            if "revise" in artifact_card.allowed_actions:
+                                with gr.Row():
+                                    revision_note = gr.Textbox(
+                                        show_label=False,
+                                        container=False,
+                                        placeholder="Revision note for the worker…",
+                                        lines=1,
+                                        scale=5,
+                                    )
+                                    btn_revise = gr.Button(
+                                        "Revise", variant="secondary", size="sm",
+                                        scale=0, min_width=96,
+                                    )
+                                    btn_revise.click(
+                                        handle_revise_artifact,
+                                        inputs=[artifact_state, revision_note],
+                                        outputs=action_sink,
+                                    )
 
-                                    if "regenerate" in artifact_card.allowed_actions:
-                                        btn_regen = gr.Button("Regenerate")
-                                        btn_regen.click(
-                                            handle_regenerate_artifact,
-                                            inputs=gr.Textbox(
-                                                value=artifact_card.artifact_id,
-                                                visible=False,
-                                            ),
-                                            outputs=gr.Textbox(visible=False),
-                                        )
+                            # --- Action bar: one row, weighted by importance.
+                            with gr.Row(elem_classes=["action-bar"]):
+                                if "approve" in artifact_card.allowed_actions:
+                                    btn_approve = gr.Button(
+                                        "Approve (locked)" if artifact_card.locked else "Approve",
+                                        variant="primary",
+                                        size="sm",
+                                        interactive=not artifact_card.locked,
+                                        scale=0,
+                                        min_width=120,
+                                    )
+                                    btn_approve.click(
+                                        handle_approve_artifact,
+                                        inputs=[artifact_state, gr.State(False)],
+                                        outputs=action_sink,
+                                    )
 
-                                    if "cancel" in artifact_card.allowed_actions:
-                                        btn_cancel = gr.Button("Cancel")
-                                        btn_cancel.click(
-                                            handle_cancel_artifact,
-                                            inputs=gr.Textbox(
-                                                value=artifact_card.artifact_id,
-                                                visible=False,
-                                            ),
-                                            outputs=gr.Textbox(visible=False),
-                                        )
+                                if "regenerate" in artifact_card.allowed_actions:
+                                    btn_regen = gr.Button(
+                                        "Regenerate", variant="secondary", size="sm",
+                                        scale=0, min_width=110,
+                                    )
+                                    btn_regen.click(
+                                        handle_regenerate_artifact,
+                                        inputs=artifact_state,
+                                        outputs=action_sink,
+                                    )
 
-                                # Revision input for generated content
-                                if "revise" in artifact_card.allowed_actions:
-                                    with gr.Row():
-                                        revision_note = gr.Textbox(
-                                            label="Revision",
-                                            placeholder="Enter revision notes...",
-                                        )
-                                        btn_revise = gr.Button("Revise")
-                                        btn_revise.click(
-                                            handle_revise_artifact,
-                                            inputs=[
-                                                gr.Textbox(
-                                                    value=artifact_card.artifact_id,
-                                                    visible=False,
-                                                ),
-                                                revision_note,
-                                            ],
-                                            outputs=gr.Textbox(visible=False),
-                                        )
+                                if "lock" in artifact_card.allowed_actions:
+                                    btn_lock = gr.Button(
+                                        "Unlock" if artifact_card.locked else "Lock",
+                                        variant="secondary",
+                                        size="sm",
+                                        scale=0,
+                                        min_width=96,
+                                    )
+                                    btn_lock.click(
+                                        handle_unlock_artifact
+                                        if artifact_card.locked
+                                        else handle_lock_artifact,
+                                        inputs=artifact_state,
+                                        outputs=action_sink,
+                                    )
 
-                                # Edit input for text content
-                                if "edit" in artifact_card.allowed_actions:
-                                    with gr.Row():
-                                        edit_content = gr.Textbox(
-                                            label="Edit",
-                                            placeholder="Enter new content...",
-                                            lines=3,
-                                        )
-                                        btn_edit = gr.Button("Update")
-                                        btn_edit.click(
-                                            handle_edit_artifact,
-                                            inputs=[
-                                                gr.Textbox(
-                                                    value=artifact_card.artifact_id,
-                                                    visible=False,
-                                                ),
-                                                edit_content,
-                                            ],
-                                            outputs=gr.Textbox(visible=False),
-                                        )
+                                if "cancel" in artifact_card.allowed_actions:
+                                    btn_cancel = gr.Button(
+                                        "Cancel", variant="stop", size="sm",
+                                        scale=0, min_width=96,
+                                    )
+                                    btn_cancel.click(
+                                        handle_cancel_artifact,
+                                        inputs=artifact_state,
+                                        outputs=action_sink,
+                                    )
 
-                    else:
-                        gr.Markdown("_No artifacts in this stage yet._")
-
-        # Message input at bottom
-        with gr.Group():
-            gr.Markdown("### Send Message to Worker")
+        # --- Worker message box: one compact line at the foot of the page.
+        with gr.Row():
             message_input = gr.Textbox(
-                label="Message",
-                placeholder="Send a message to the worker...",
-                lines=2,
+                show_label=False,
+                container=False,
+                placeholder="Message the worker…",
+                lines=1,
+                scale=6,
             )
-            btn_message = gr.Button("Send")
+            btn_message = gr.Button(
+                "Send", variant="secondary", size="sm", scale=0, min_width=96
+            )
             btn_message.click(
                 handle_message,
                 inputs=message_input,
-                outputs=gr.Textbox(visible=False),
+                outputs=action_sink,
             )
 
-        # Refresh button
-        btn_refresh = gr.Button("Refresh")
         btn_refresh.click(
             refresh_board,
-            outputs=[title_display, status_display, gr.Textbox(visible=False)],
+            outputs=[title_display, status_display, action_sink],
         )
 
     return demo
