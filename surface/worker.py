@@ -138,6 +138,12 @@ def _handle_edit(
         return {"ok": False, "error": str(e)}
 
 
+# Artifact types that represent async provider generation (image/video jobs
+# via _create_generation_job). Every other VALID_ARTIFACT_TYPES value (text,
+# form, diff, file, audio) is revised as a direct new version instead.
+_GENERATION_ARTIFACT_TYPES = ("image", "video")
+
+
 def _handle_revise(
     artifact_id: Optional[str],
     payload: Dict[str, Any],
@@ -163,8 +169,14 @@ def _handle_revise(
     # Determine artifact type from config
     artifact_type = _get_artifact_type_for_artifact(artifact_id, artifact, config)
 
-    # For text artifacts, create a version
-    if artifact_type == "text":
+    # Only image/video artifact types represent async generation work (see
+    # _GENERATION_ARTIFACT_TYPES). Every other type — including "form",
+    # "diff", "file" (SPEC section 30's VALID_ARTIFACT_TYPES) — must be
+    # revised the same way "text" is: a new version, not a generation job.
+    # A prior bug treated "anything that isn't text" as generation, so a
+    # revise on a questionnaire ("form") artifact incorrectly tried to spin
+    # up an image/video job.
+    if artifact_type not in _GENERATION_ARTIFACT_TYPES:
         # Use selected version's content as basis, revise with note
         if artifact["selected_version_id"]:
             selected_ver = store.get_version(artifact["selected_version_id"])

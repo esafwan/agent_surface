@@ -783,6 +783,36 @@ class TestBudgetEnforcement:
         assert jobs[0]["cost_estimate"] == 0.1
 
 
+class TestReviseNonGenerationArtifactTypes:
+    """Only image/video artifact types create generation jobs on revise; every
+    other VALID_ARTIFACT_TYPES value (form, diff, file, audio, text) must
+    create a version instead. A prior bug treated "anything not text" as
+    generation, incorrectly routing a revise on a "form" artifact (e.g. the
+    questionnaire preset) into an image/video job."""
+
+    def test_revise_on_form_artifact_creates_version_not_job(self):
+        import json
+        with open("surface/stages/questionnaire.json") as f:
+            config = json.load(f)
+
+        store = Store(":memory:")
+        store.create_artifact(id="q_1", stage="questions", title="Q1")
+
+        event = {
+            "event_id": "evt_form_revise",
+            "type": "revise",
+            "artifact_id": "q_1",
+            "payload": {"note": "clarify wording"},
+            "config": config,
+        }
+        result = handle_event(event, store)
+
+        assert result["ok"] is True
+        assert "version_id" in result
+        assert store.list_versions("q_1")
+        assert store.list_jobs_by_status("queued") == []
+
+
 class TestGenerationJobIdempotency:
     """store.create_job has no built-in dedupe key, so the worker itself
     must guard against a redelivered event (e.g. the supervisor's bounded
