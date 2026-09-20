@@ -599,7 +599,10 @@ class SurfaceCLI:
               worker_command: Optional[List[str]] = None,
               transport: Optional[Any] = None,
               poll_interval: float = 0.5,
-              keep_runtime_files: bool = False) -> None:
+              keep_runtime_files: bool = False,
+              pool_size: int = 1,
+              recycle_after_events: Optional[int] = None,
+              recycle_after_tokens: Optional[int] = None) -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
         Architecture (single process):
@@ -705,10 +708,13 @@ class SurfaceCLI:
                 worker_id="cli_worker",
                 lease_seconds=60,
                 turn_timeout=300,
+                recycle_after_events=recycle_after_events,
+                recycle_after_tokens=recycle_after_tokens,
             )
             supervisor = Supervisor(
                 store, transport, stage_config, supervisor_config,
                 project_id=project_id,
+                pool_size=pool_size,
             )
 
             # -----------------------------------------------------------------
@@ -745,9 +751,31 @@ class SurfaceCLI:
             else:
                 logger.info(f"Starting supervisor loop ({bound} iteration(s))...")
 
+            interrupt_flag = run_dir / "interrupt_requested"
+
             try:
                 while not stop_event.is_set() and (bound is None or iterations < bound):
-                    supervisor.claim_and_dispatch_event()
+                    if interrupt_flag.exists():
+                        # `surface interrupt` (a separate process) wrote this
+                        # flag; consume it and forward to the live
+                        # Supervisor in THIS process before removing it, so
+                        # a second `interrupt` call is needed for a second
+                        # interruption rather than one flag firing forever.
+                        try:
+                            result = supervisor.request_worker_interrupt()
+                            logger.info(f"Processed interrupt request: {result}")
+                        except Exception as e:
+                            logger.warning(f"Error handling interrupt request: {e}")
+                        finally:
+                            interrupt_flag.unlink(missing_ok=True)
+                    if pool_size > 1:
+                        # run_pool_once() claims/dispatches up to pool_size
+                        # events concurrently (one per worker session,
+                        # same-artifact events still serialized via the
+                        # store's artifact leases) instead of one at a time.
+                        supervisor.run_pool_once()
+                    else:
+                        supervisor.claim_and_dispatch_event()
                     jobs_processed = poller.poll_once()
                     if jobs_processed:
                         logger.info(f"Poller processed {jobs_processed} job(s)")
@@ -783,9 +811,9 @@ class SurfaceCLI:
             # transport, and invalidates the runtime pid/token files.
             if supervisor is not None:
                 try:
-                    supervisor.stop_worker()
+                    supervisor.stop_all_workers()
                 except Exception as e:
-                    logger.warning(f"Error stopping worker: {e}")
+                    logger.warning(f"Error stopping worker(s): {e}")
                 for session in list(getattr(supervisor.transport, "sessions", {}).values()):
                     try:
                         supervisor.transport.close(session)
@@ -863,6 +891,44 @@ class SurfaceCLI:
             "runtime_files_cleared": True,
         })
 
+    def interrupt(self, runtime_dir: Optional[str] = None) -> None:
+        """Request interruption of whatever the running `surface serve`
+        worker is currently doing (SPEC section 22/56: robust cancellation
+        of an in-flight worker turn, distinct from job cancellation).
+
+        This process and the running `serve()` process are separate OS
+        processes with no shared memory, so this cannot call
+        Supervisor.request_worker_interrupt() directly. Instead it writes a
+        flag file into the runtime dir; `serve()`'s loop polls for that flag
+        once per iteration and, if present, calls
+        `request_worker_interrupt()` on its live Supervisor before removing
+        the flag. This command only confirms the flag was written -- it
+        cannot confirm a `serve()` process actually observed it (there is no
+        running-process guarantee here, only a best-effort signal, same
+        limitation `stop`/`recover` have via pid files).
+        """
+        run_dir = self.runtime_dir(runtime_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        flag_path = run_dir / "interrupt_requested"
+        flag_path.write_text(datetime.now(timezone.utc).isoformat())
+
+        board_pid_path = run_dir / "supervisor.pid"
+        likely_running = False
+        if board_pid_path.exists():
+            try:
+                pid = int(board_pid_path.read_text().strip())
+                os.kill(pid, 0)
+                likely_running = True
+            except (ValueError, OSError):
+                likely_running = False
+
+        self._json_output({
+            "ok": True,
+            "runtime_dir": str(run_dir),
+            "flag_path": str(flag_path),
+            "likely_running": likely_running,
+        })
+
     def recover(self, force_reclaim: bool = False, stale_seconds: int = 300) -> None:
         """Diagnose (and optionally repair) stuck events/jobs (SPEC section 40).
 
@@ -877,21 +943,16 @@ class SurfaceCLI:
 
         `--force-reclaim` makes this actively repair what it found:
           * for each event with an expired lease, it calls
-            `store.claim_next_event()` (a throwaway worker id) so the
-            store's own, already-tested lease-expiry step resets the
-            event to `pending`. If that same call also hands the
-            recovery worker a fresh claim (a normal side effect of
-            `claim_next_event` immediately looking for new work after the
-            reset), the event is explicitly marked `failed` with a
-            descriptive error rather than left claimed by a worker that
-            will never process it -- "force" does not silently retry work,
-            it fails it visibly for a human/board to re-drive.
+            `store.reclaim_expired_leases()`, which resets those events to
+            `pending` and releases their artifact locks WITHOUT also
+            claiming/leasing an unrelated healthy pending event as a side
+            effect (an earlier version of this command used
+            `claim_next_event()` for this, which could strand a perfectly
+            healthy event under a `surface-recover` worker id that would
+            never actually process it).
           * for each stuck job, it marks the job `failed` with a
             descriptive error via the store's normal `update_job_status`,
             so it stops occupying `queued`/`running` and can be resubmitted.
-
-        No new store.py methods are added; this only calls existing public
-        Store methods.
         """
         store = self.get_store()
         if not store:
@@ -933,21 +994,17 @@ class SurfaceCLI:
 
             actions: List[Dict[str, Any]] = []
             if force_reclaim:
-                expired_ids = {e["id"] for e in expired_events}
-                # A single claim_next_event() call resets ALL expired-lease
-                # events to pending (store.py step 1) as a side effect,
-                # regardless of what (if anything) it goes on to claim.
-                claimed = store.claim_next_event(worker_id="surface-recover")
-                if claimed and claimed["id"] in expired_ids:
-                    store.fail_event(
-                        claimed["id"],
-                        error="reclaimed by 'surface recover --force-reclaim'; "
-                              "requires manual retry",
-                    )
-                    actions.append({"type": "event_failed", "id": claimed["id"]})
-                for evt in expired_events:
-                    if evt["id"] not in {a["id"] for a in actions}:
-                        actions.append({"type": "event_reset_to_pending", "id": evt["id"]})
+                # reclaim_expired_leases() only resets expired-lease events
+                # to pending and releases their artifact locks — unlike
+                # claim_next_event(), it never also claims/leases a healthy,
+                # unrelated pending event as a side effect (a prior version
+                # of this command used claim_next_event() for this cleanup
+                # side effect, which could strand a perfectly healthy event
+                # in 'processing' under a 'surface-recover' worker id that
+                # would never actually run it).
+                reclaimed_ids = store.reclaim_expired_leases()
+                for evt_id in reclaimed_ids:
+                    actions.append({"type": "event_reset_to_pending", "id": evt_id})
 
                 for job in stuck_jobs:
                     store.update_job_status(
@@ -1078,6 +1135,42 @@ class SurfaceCLI:
                 return
 
             time.sleep(min(poll_interval, max_seconds - elapsed))
+
+    def answer(self, handle: str, value: str) -> None:
+        """Answer a `render`ed interaction, closing the round-trip with `wait`.
+
+        Without this command, nothing in the system ever writes
+        `status: "answered"` into an interaction file -- `render` creates a
+        handle and `wait` polls it, but there was no path for a human/board
+        to actually answer it, so `wait` could only ever return "pending" in
+        real usage. This is the missing write side.
+
+        `value` is a JSON string (e.g. '{"choice":"A"}') matching the
+        `value` field `wait` returns on success.
+        """
+        path = self._interactions_dir() / f"{handle}.json"
+        if not path.exists():
+            self._error(f"Unknown interaction handle: {handle}")
+            return
+
+        try:
+            record = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            self._error(f"Could not read interaction '{handle}': {e}")
+            return
+
+        try:
+            parsed_value = json.loads(value)
+        except json.JSONDecodeError as e:
+            self._error(f"--value must be valid JSON: {e}")
+            return
+
+        record["status"] = "answered"
+        record["value"] = parsed_value
+        record["answered_at"] = datetime.now(timezone.utc).isoformat()
+        path.write_text(json.dumps(record, indent=2))
+
+        self._json_output({"ok": True, "handle": handle, "status": "answered"})
 
     # =========================================================================
     # Utilities
@@ -1287,6 +1380,20 @@ def main():
         "--keep-runtime-files", action="store_true",
         help="Do not delete run/{token,port,*.pid} on shutdown",
     )
+    serve_parser.add_argument(
+        "--pool-size", type=int, default=1,
+        help="Concurrent worker sessions for unrelated artifacts "
+             "(SPEC section 25; default: 1 = serial, matches Phase 0 behavior)",
+    )
+    serve_parser.add_argument(
+        "--recycle-after-events", type=int, default=None,
+        help="Recycle the worker session after this many dispatched events",
+    )
+    serve_parser.add_argument(
+        "--recycle-after-tokens", type=int, default=None,
+        help="Recycle the worker session after this many reported tokens "
+             "(inert unless a worker reports token usage)",
+    )
 
     # =========================================================================
     # Recovery CLI (SPEC section 45, 40)
@@ -1295,6 +1402,15 @@ def main():
         "stop", help="Stop a running board (signals pids, clears runtime state only)"
     )
     stop_parser.add_argument(
+        "--runtime-dir", default=None,
+        help="Override the runtime directory (default: <db dir>/run)",
+    )
+
+    interrupt_parser = subparsers.add_parser(
+        "interrupt",
+        help="Request interruption of the running serve() worker's current turn",
+    )
+    interrupt_parser.add_argument(
         "--runtime-dir", default=None,
         help="Override the runtime directory (default: <db dir>/run)",
     )
@@ -1333,6 +1449,15 @@ def main():
     wait_parser.add_argument(
         "--max", type=float, required=True, dest="max_seconds",
         help="Maximum seconds to poll before returning 'pending' (required; every wait is bounded)",
+    )
+
+    answer_parser = subparsers.add_parser(
+        "answer", help="Answer a rendered interaction (closes the render/wait round-trip)"
+    )
+    answer_parser.add_argument("handle", help="Interaction handle returned by 'surface render'")
+    answer_parser.add_argument(
+        "--value", required=True,
+        help="JSON value to answer with, e.g. '{\"choice\":\"A\"}'",
     )
 
     # Parse arguments
@@ -1403,10 +1528,16 @@ def main():
             board=args.board,
             poll_interval=args.poll_interval,
             keep_runtime_files=args.keep_runtime_files,
+            pool_size=args.pool_size,
+            recycle_after_events=args.recycle_after_events,
+            recycle_after_tokens=args.recycle_after_tokens,
         )
 
     elif args.command == "stop":
         cli.stop(runtime_dir=args.runtime_dir)
+
+    elif args.command == "interrupt":
+        cli.interrupt(runtime_dir=args.runtime_dir)
 
     elif args.command == "recover":
         cli.recover(force_reclaim=args.force_reclaim, stale_seconds=args.stale_seconds)
@@ -1416,6 +1547,9 @@ def main():
 
     elif args.command == "wait":
         cli.wait(args.handle, max_seconds=args.max_seconds)
+
+    elif args.command == "answer":
+        cli.answer(args.handle, value=args.value)
 
     else:
         parser.print_help()

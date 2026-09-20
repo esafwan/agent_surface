@@ -440,6 +440,45 @@ class Store:
         res["payload"] = json.loads(res["payload_json"]) if res.get("payload_json") else {}
         return res
 
+    def reclaim_expired_leases(self) -> List[str]:
+        """Return processing events with an expired lease to 'pending' and
+        release their artifact locks, WITHOUT claiming a new event.
+
+        This is the same lease-recovery side effect claim_next_event()
+        performs as its first step, exposed standalone so a caller (e.g. a
+        recovery/diagnostic CLI command) can trigger lease reclamation
+        without also claiming and leasing an unrelated healthy event as a
+        side effect of calling claim_next_event() purely for its cleanup
+        behavior.
+
+        Returns:
+            List of event ids that were reclaimed.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id FROM events WHERE status = 'processing' AND lease_until IS NOT NULL AND lease_until < ?",
+            (now,),
+        )
+        expired_events = cursor.fetchall()
+        reclaimed = []
+        for (exp_id,) in expired_events:
+            cursor.execute(
+                "UPDATE events SET status = 'pending', claimed_by = NULL, claimed_at = NULL, lease_until = NULL WHERE id = ?",
+                (exp_id,),
+            )
+            cursor.execute(
+                "DELETE FROM artifact_locks WHERE event_id = ?",
+                (exp_id,),
+            )
+            reclaimed.append(exp_id)
+        cursor.execute(
+            "DELETE FROM artifact_locks WHERE lease_until < ?",
+            (now,),
+        )
+        self.conn.commit()
+        return reclaimed
+
     def claim_next_event(
         self, worker_id: str, lease_seconds: int = 60
     ) -> Optional[Dict[str, Any]]:

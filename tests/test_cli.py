@@ -1036,6 +1036,76 @@ class TestRecoverCommand:
         fresh_job = store.get_job(job["id"])
         assert fresh_job["status"] == "failed"
 
+    def test_recover_force_reclaim_does_not_strand_an_unrelated_healthy_event(
+        self, cli_with_temp_db, capsys
+    ):
+        """A prior version of --force-reclaim used claim_next_event() purely
+        for its lease-reset side effect; if that same call also claimed an
+        unrelated healthy pending event, that event was left leased/
+        'processing' under a 'surface-recover' worker id that would never
+        actually process it -- self-healing only after its lease expired.
+        reclaim_expired_leases() must reset only expired-lease events and
+        never touch/claim a healthy pending event at all."""
+        cli = cli_with_temp_db
+        store = cli.get_store(create=True)
+
+        # An expired-lease event to be reclaimed.
+        store.create_artifact(id="art_expired", stage="script", title="Expired")
+        expired_event = store.enqueue_event(
+            type="user_note", payload={}, artifact_id="art_expired"
+        )
+        store.claim_next_event(worker_id="w1")
+        store.conn.execute(
+            "UPDATE events SET lease_until = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", expired_event["id"]),
+        )
+        store.conn.commit()
+
+        # A completely healthy, never-claimed pending event on a different
+        # artifact -- must remain untouched by --force-reclaim.
+        store.create_artifact(id="art_healthy", stage="script", title="Healthy")
+        healthy_event = store.enqueue_event(
+            type="user_note", payload={}, artifact_id="art_healthy"
+        )
+
+        cli.recover(force_reclaim=True)
+        capsys.readouterr()
+
+        fresh_healthy = store.get_event(healthy_event["id"])
+        assert fresh_healthy["status"] == "pending"
+        assert fresh_healthy["claimed_by"] is None
+        assert fresh_healthy["lease_until"] is None
+
+        fresh_expired = store.get_event(expired_event["id"])
+        assert fresh_expired["status"] == "pending"
+
+
+class TestInterruptCommand:
+    """Tests for `surface interrupt` (SPEC section 22/56)."""
+
+    def test_interrupt_writes_flag_file(self, cli_with_temp_db, capsys, tmp_path):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        runtime_dir = str(tmp_path / "run")
+
+        cli.interrupt(runtime_dir=runtime_dir)
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+
+        assert output["ok"] is True
+        flag_path = Path(output["flag_path"])
+        assert flag_path.exists()
+        assert flag_path.name == "interrupt_requested"
+
+    def test_interrupt_reports_not_likely_running_without_pid_file(
+        self, cli_with_temp_db, capsys, tmp_path
+    ):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        cli.interrupt(runtime_dir=str(tmp_path / "run"))
+        output = json.loads(capsys.readouterr().out)
+        assert output["likely_running"] is False
+
 
 class TestRenderWaitCommands:
     """Tests for `surface render` + `surface wait` (SPEC section 35)."""
@@ -1151,3 +1221,49 @@ class TestRenderWaitCommands:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "unknown" in captured.err.lower() or "error" in captured.err.lower()
+
+    def test_render_answer_wait_round_trip_via_cli_commands_only(
+        self, cli_with_temp_db, tmp_path, capsys
+    ):
+        """Closes the render/wait round-trip gap: previously nothing in the
+        system could ever write status="answered" into an interaction file
+        in real usage (only tests poked the file directly), so `wait` could
+        never return "answered" outside a test. `surface answer` is the
+        missing write side; this drives all three commands exactly as a
+        real user/script would, with no direct file manipulation."""
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": ["Pick one"]})
+
+        cli.render("questionnaire", data=data_path)
+        handle = json.loads(capsys.readouterr().out)["handle"]
+
+        cli.answer(handle, value='{"choice": "A"}')
+        answer_output = json.loads(capsys.readouterr().out)
+        assert answer_output["ok"] is True
+        assert answer_output["status"] == "answered"
+
+        cli.wait(handle, max_seconds=1.0)
+        wait_output = json.loads(capsys.readouterr().out)
+        assert wait_output["status"] == "answered"
+        assert wait_output["value"] == {"choice": "A"}
+
+    def test_answer_unknown_handle_fails_cleanly(self, cli_with_temp_db, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        cli.answer("interaction_doesnotexist", value="{}")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "unknown" in captured.err.lower()
+
+    def test_answer_invalid_json_value_fails_cleanly(self, cli_with_temp_db, tmp_path, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": []})
+        cli.render("questionnaire", data=data_path)
+        handle = json.loads(capsys.readouterr().out)["handle"]
+
+        cli.answer(handle, value="{not valid json")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "json" in captured.err.lower()
