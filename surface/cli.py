@@ -19,11 +19,14 @@ import signal
 import socket
 import sys
 import threading
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from surface.store import Store
-from surface.stages.config import StageConfig
+from surface.stages.config import StageConfig, load_preset, load_stage_config
 from surface.supervisor import Supervisor, SupervisorConfig
 from surface.transports.native_stream import NativeStreamTransport
 from surface.poller import Poller
@@ -792,6 +795,291 @@ class SurfaceCLI:
                 self._clear_runtime_files(run_dir)
 
     # =========================================================================
+    # Recovery CLI (SPEC section 45, 40)
+    # =========================================================================
+
+    def stop(self, runtime_dir: Optional[str] = None) -> None:
+        """Stop a running `surface serve` process and clear runtime state.
+
+        Per SPEC section 45: stop MUST NOT delete the SQLite db or any
+        artifacts/versions -- only the runtime/process state under
+        `.surface-board/run/` (pid files, token, port). If a pid file
+        references a live process, it is sent SIGTERM and given a brief
+        grace period to exit before the runtime files are cleared
+        regardless of whether the process actually stopped in time.
+
+        This process never signals its own pid (a `serve()` invoked
+        in-process, e.g. under test, records its own pid in board.pid /
+        supervisor.pid / poller.pid; signalling ourselves would be
+        nonsensical and dangerous).
+        """
+        run_dir = self.runtime_dir(runtime_dir)
+        run_dir_existed = run_dir.exists()
+
+        pids_found: Dict[str, int] = {}
+        for name in ("board.pid", "supervisor.pid", "poller.pid"):
+            path = run_dir / name
+            if not path.exists():
+                continue
+            try:
+                pids_found[name] = int(path.read_text().strip())
+            except (ValueError, OSError):
+                continue
+
+        stopped_pids: List[int] = []
+        skipped_self = False
+        for pid in sorted(set(pids_found.values())):
+            if pid == os.getpid():
+                skipped_self = True
+                continue
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                continue  # not running; nothing to signal
+
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+
+            # Brief grace period for a clean shutdown (bounded, not a real wait).
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    break
+                time.sleep(0.1)
+            stopped_pids.append(pid)
+
+        self._clear_runtime_files(run_dir)
+
+        self._json_output({
+            "ok": True,
+            "runtime_dir": str(run_dir),
+            "runtime_dir_existed": run_dir_existed,
+            "pids_found": pids_found,
+            "stopped_pids": stopped_pids,
+            "skipped_self": skipped_self,
+            "runtime_files_cleared": True,
+        })
+
+    def recover(self, force_reclaim: bool = False, stale_seconds: int = 300) -> None:
+        """Diagnose (and optionally repair) stuck events/jobs (SPEC section 40).
+
+        Reports, without mutating anything by default:
+          * "processing" events whose lease has already expired -- these
+            would be silently reclaimed to `pending` on the very next
+            `claim_next_event` call (that reset happens unconditionally as
+            step 1 of `claim_next_event`, before it looks for new work).
+          * jobs stuck in `queued`/`running` whose `updated_at` is older
+            than `stale_seconds` (default 300s / 5 minutes) -- i.e. no
+            poller/provider activity has touched them recently.
+
+        `--force-reclaim` makes this actively repair what it found:
+          * for each event with an expired lease, it calls
+            `store.claim_next_event()` (a throwaway worker id) so the
+            store's own, already-tested lease-expiry step resets the
+            event to `pending`. If that same call also hands the
+            recovery worker a fresh claim (a normal side effect of
+            `claim_next_event` immediately looking for new work after the
+            reset), the event is explicitly marked `failed` with a
+            descriptive error rather than left claimed by a worker that
+            will never process it -- "force" does not silently retry work,
+            it fails it visibly for a human/board to re-drive.
+          * for each stuck job, it marks the job `failed` with a
+            descriptive error via the store's normal `update_job_status`,
+            so it stops occupying `queued`/`running` and can be resubmitted.
+
+        No new store.py methods are added; this only calls existing public
+        Store methods.
+        """
+        store = self.get_store()
+        if not store:
+            self._error(f"No store at {self.db_path}. Use 'surface init' first.")
+            return
+
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            cursor = store.conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, artifact_id, claimed_by, claimed_at, lease_until
+                FROM events
+                WHERE status = 'processing' AND lease_until IS NOT NULL AND lease_until < ?
+                ORDER BY lease_until ASC
+                """,
+                (now_iso,),
+            )
+            expired_events = [dict(row) for row in cursor.fetchall()]
+
+            cursor.execute(
+                "SELECT id, artifact_id, provider, kind, status, updated_at FROM jobs "
+                "WHERE status IN ('queued', 'running')"
+            )
+            stuck_jobs = []
+            for row in cursor.fetchall():
+                job = dict(row)
+                try:
+                    updated_dt = datetime.fromisoformat(job["updated_at"])
+                except (TypeError, ValueError):
+                    continue
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - updated_dt).total_seconds()
+                if age >= stale_seconds:
+                    job["age_seconds"] = age
+                    stuck_jobs.append(job)
+
+            actions: List[Dict[str, Any]] = []
+            if force_reclaim:
+                expired_ids = {e["id"] for e in expired_events}
+                # A single claim_next_event() call resets ALL expired-lease
+                # events to pending (store.py step 1) as a side effect,
+                # regardless of what (if anything) it goes on to claim.
+                claimed = store.claim_next_event(worker_id="surface-recover")
+                if claimed and claimed["id"] in expired_ids:
+                    store.fail_event(
+                        claimed["id"],
+                        error="reclaimed by 'surface recover --force-reclaim'; "
+                              "requires manual retry",
+                    )
+                    actions.append({"type": "event_failed", "id": claimed["id"]})
+                for evt in expired_events:
+                    if evt["id"] not in {a["id"] for a in actions}:
+                        actions.append({"type": "event_reset_to_pending", "id": evt["id"]})
+
+                for job in stuck_jobs:
+                    store.update_job_status(
+                        job["id"],
+                        status="failed",
+                        result={
+                            "error": "reclaimed by 'surface recover --force-reclaim' "
+                                     f"(no update for >= {stale_seconds}s)"
+                        },
+                    )
+                    actions.append({"type": "job_failed", "id": job["id"]})
+
+            self._json_output({
+                "ok": True,
+                "expired_lease_events": expired_events,
+                "stuck_jobs": stuck_jobs,
+                "stale_seconds": stale_seconds,
+                "force_reclaim": force_reclaim,
+                "actions": actions,
+            })
+        except Exception as e:
+            self._error(f"Error recovering: {e}")
+
+    # =========================================================================
+    # Convenience Mode: render + bounded wait (SPEC section 35)
+    # =========================================================================
+    #
+    # Design note: there is no dedicated "interaction" table in schema.py /
+    # store.py, and this task explicitly must not add one. Rather than bend
+    # the artifact/version/event model to mean something it doesn't
+    # ("pending answer" has no honest representation there without inventing
+    # new status/event semantics), interactions are tracked in a minimal
+    # local JSON file store: `.surface-board/interactions/<handle>.json`.
+    #
+    # Mapping:
+    #   handle              == the interaction id (`interaction_<hex8>`),
+    #                          and also the filename stem.
+    #   render()            writes {"handle", "stage", "content", "status":
+    #                       "pending", "value": None, "created_at"}.
+    #   "answered"          means some external process (a human via the
+    #                       board, a test, a future `surface answer` command)
+    #                       has overwritten the file with "status": "answered"
+    #                       and a "value" payload. This CLI change does not
+    #                       add a way to *produce* an answer through the
+    #                       board/worker -- that is a known limitation, see
+    #                       the report to the integrator.
+    #   wait()              polls that file, bounded by --max seconds.
+
+    def _interactions_dir(self) -> Path:
+        return Path(self.db_path).resolve().parent / "interactions"
+
+    def render(self, stage_config_path_or_preset: str, data: str) -> None:
+        """Render a stage config against `--data` and create a durable handle."""
+        try:
+            if Path(stage_config_path_or_preset).exists():
+                stage_config = load_stage_config(stage_config_path_or_preset)
+            else:
+                stage_config = load_preset(stage_config_path_or_preset)
+        except FileNotFoundError as e:
+            self._error(f"Stage config not found: {e}")
+            return
+        except Exception as e:
+            self._error(f"Invalid stage config: {e}")
+            return
+
+        data_path = Path(data)
+        if not data_path.exists():
+            self._error(f"Data file not found: {data}")
+            return
+        try:
+            with open(data_path, "r") as f:
+                content = json.load(f)
+        except json.JSONDecodeError as e:
+            self._error(f"Invalid JSON in data file '{data}': {e}")
+            return
+
+        handle = f"interaction_{uuid.uuid4().hex[:8]}"
+        interactions_dir = self._interactions_dir()
+        interactions_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "handle": handle,
+            "stage": stage_config.id,
+            "content": content,
+            "status": "pending",
+            "value": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (interactions_dir / f"{handle}.json").write_text(json.dumps(record, indent=2))
+
+        self._json_output({
+            "status": "pending",
+            "handle": handle,
+            "stage": stage_config.id,
+        })
+
+    def wait(self, handle: str, max_seconds: float) -> None:
+        """Poll an interaction handle, bounded by `max_seconds`.
+
+        Every wait is bounded (SPEC section 35): this loop always returns
+        within `max_seconds` (plus one poll-interval's slack), never blocks
+        indefinitely.
+        """
+        if max_seconds is None or max_seconds < 0:
+            self._error("--max must be a non-negative number of seconds")
+            return
+
+        path = self._interactions_dir() / f"{handle}.json"
+        if not path.exists():
+            self._error(f"Unknown interaction handle: {handle}")
+            return
+
+        poll_interval = 0.5
+        start = time.monotonic()
+        while True:
+            try:
+                record = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                self._error(f"Could not read interaction '{handle}': {e}")
+                return
+
+            if record.get("status") == "answered":
+                self._json_output({"status": "answered", "value": record.get("value")})
+                return
+
+            elapsed = time.monotonic() - start
+            if elapsed >= max_seconds:
+                self._json_output({"status": "pending", "handle": handle})
+                return
+
+            time.sleep(min(poll_interval, max_seconds - elapsed))
+
+    # =========================================================================
     # Utilities
     # =========================================================================
 
@@ -1000,6 +1288,53 @@ def main():
         help="Do not delete run/{token,port,*.pid} on shutdown",
     )
 
+    # =========================================================================
+    # Recovery CLI (SPEC section 45, 40)
+    # =========================================================================
+    stop_parser = subparsers.add_parser(
+        "stop", help="Stop a running board (signals pids, clears runtime state only)"
+    )
+    stop_parser.add_argument(
+        "--runtime-dir", default=None,
+        help="Override the runtime directory (default: <db dir>/run)",
+    )
+
+    recover_parser = subparsers.add_parser(
+        "recover", help="Diagnose (and optionally repair) stuck events/jobs"
+    )
+    recover_parser.add_argument(
+        "--force-reclaim", action="store_true",
+        help="Actively repair: reset expired-lease events and fail stuck jobs "
+             "(see 'surface recover --help' output / docs for exact semantics)",
+    )
+    recover_parser.add_argument(
+        "--stale-seconds", type=int, default=300,
+        help="Jobs queued/running with no update for this many seconds are "
+             "considered stuck (default: 300)",
+    )
+
+    # =========================================================================
+    # Convenience Mode (SPEC section 35)
+    # =========================================================================
+    render_parser = subparsers.add_parser(
+        "render", help="Render a stage config + data into a durable interaction handle"
+    )
+    render_parser.add_argument(
+        "stage_config", help="Preset name (e.g. 'questionnaire') or path to a stage config JSON file"
+    )
+    render_parser.add_argument(
+        "--data", required=True, help="Path to JSON data/content to render"
+    )
+
+    wait_parser = subparsers.add_parser(
+        "wait", help="Poll an interaction handle for an answer, bounded by --max seconds"
+    )
+    wait_parser.add_argument("handle", help="Interaction handle returned by 'surface render'")
+    wait_parser.add_argument(
+        "--max", type=float, required=True, dest="max_seconds",
+        help="Maximum seconds to poll before returning 'pending' (required; every wait is bounded)",
+    )
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -1069,6 +1404,18 @@ def main():
             poll_interval=args.poll_interval,
             keep_runtime_files=args.keep_runtime_files,
         )
+
+    elif args.command == "stop":
+        cli.stop(runtime_dir=args.runtime_dir)
+
+    elif args.command == "recover":
+        cli.recover(force_reclaim=args.force_reclaim, stale_seconds=args.stale_seconds)
+
+    elif args.command == "render":
+        cli.render(args.stage_config, data=args.data)
+
+    elif args.command == "wait":
+        cli.wait(args.handle, max_seconds=args.max_seconds)
 
     else:
         parser.print_help()

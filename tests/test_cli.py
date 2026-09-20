@@ -11,6 +11,7 @@ import re
 import stat
 import tempfile
 import threading
+import time
 from pathlib import Path
 from io import StringIO
 import sys
@@ -863,3 +864,290 @@ class TestIntegration:
         status = json.loads(captured.out)
         assert status["db_exists"] is True
         assert status["artifact_count"] == 2
+
+
+class TestStopCommand:
+    """Tests for `surface stop` (SPEC section 45)."""
+
+    def test_stop_noop_when_no_runtime_files(self, cli_with_temp_db, capsys):
+        """No runtime dir/pid files at all is a clean no-op, not an error."""
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+
+        cli.stop()
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        output = json.loads(captured.out)
+        assert output["ok"] is True
+        assert output["pids_found"] == {}
+        assert output["stopped_pids"] == []
+
+    def test_stop_signals_running_process_and_clears_files_only(
+        self, cli_with_temp_db, capsys
+    ):
+        """A live pid gets SIGTERM; db/artifacts are untouched, only run/* is cleared."""
+        import subprocess
+
+        cli = cli_with_temp_db
+        store = cli.get_store(create=True)
+        store.create_artifact(id="art_1", stage="script", title="Script")
+        store.put_version(artifact_id="art_1", content="hello", created_by="test")
+
+        run_dir = cli.runtime_dir()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            for name in ("board.pid", "supervisor.pid", "poller.pid"):
+                (run_dir / name).write_text(str(proc.pid))
+            (run_dir / "token").write_text("sometoken")
+            (run_dir / "port").write_text("12345")
+
+            cli.stop()
+            captured = capsys.readouterr()
+            output = json.loads(captured.out)
+
+            assert output["ok"] is True
+            assert output["stopped_pids"] == [proc.pid]
+
+            proc.wait(timeout=5)
+            assert proc.returncode is not None
+
+            for name in ("board.pid", "supervisor.pid", "poller.pid", "token", "port"):
+                assert not (run_dir / name).exists()
+
+            # DB and artifacts must be untouched.
+            assert Path(cli.db_path).exists()
+            artifacts = store.list_artifacts()
+            assert len(artifacts) == 1
+            assert store.get_artifact("art_1") is not None
+            assert len(store.list_versions("art_1")) == 1
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+    def test_stop_never_signals_own_pid(self, cli_with_temp_db, capsys):
+        """A pid file matching this process's own pid must never be signalled."""
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        run_dir = cli.runtime_dir()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "supervisor.pid").write_text(str(os.getpid()))
+
+        cli.stop()
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+
+        assert output["skipped_self"] is True
+        assert os.getpid() not in output["stopped_pids"]
+        # We must still be alive to observe this.
+        assert True
+
+
+class TestRecoverCommand:
+    """Tests for `surface recover` (SPEC section 40)."""
+
+    def test_recover_reports_expired_lease_event_without_mutating(
+        self, cli_with_temp_db, capsys
+    ):
+        cli = cli_with_temp_db
+        store = cli.get_store(create=True)
+        store.create_artifact(id="art_1", stage="script", title="Script")
+        event = store.enqueue_event(type="user_note", payload={}, artifact_id="art_1")
+        claimed = store.claim_next_event(worker_id="w1")
+        assert claimed["id"] == event["id"]
+
+        # Force the lease into the past directly (public API has no setter for this).
+        store.conn.execute(
+            "UPDATE events SET lease_until = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", event["id"]),
+        )
+        store.conn.commit()
+
+        cli.recover()
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+
+        assert output["force_reclaim"] is False
+        ids = [e["id"] for e in output["expired_lease_events"]]
+        assert event["id"] in ids
+
+        # No mutation by default: still processing.
+        fresh = store.get_event(event["id"])
+        assert fresh["status"] == "processing"
+
+    def test_recover_reports_stuck_job(self, cli_with_temp_db, capsys):
+        cli = cli_with_temp_db
+        store = cli.get_store(create=True)
+        store.create_artifact(id="art_1", stage="shots", title="Shot")
+        job = store.create_job(
+            artifact_id="art_1", provider="image_default", kind="image", request={}
+        )
+        store.conn.execute(
+            "UPDATE jobs SET updated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", job["id"]),
+        )
+        store.conn.commit()
+
+        cli.recover(stale_seconds=300)
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+
+        ids = [j["id"] for j in output["stuck_jobs"]]
+        assert job["id"] in ids
+
+        fresh = store.get_job(job["id"])
+        assert fresh["status"] == "queued"  # untouched by default
+
+    def test_recover_force_reclaim_resets_expired_event_and_fails_stuck_job(
+        self, cli_with_temp_db, capsys
+    ):
+        cli = cli_with_temp_db
+        store = cli.get_store(create=True)
+        store.create_artifact(id="art_1", stage="script", title="Script")
+        event = store.enqueue_event(type="user_note", payload={}, artifact_id="art_1")
+        store.claim_next_event(worker_id="w1")
+        store.conn.execute(
+            "UPDATE events SET lease_until = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", event["id"]),
+        )
+
+        store.create_artifact(id="art_2", stage="shots", title="Shot")
+        job = store.create_job(
+            artifact_id="art_2", provider="image_default", kind="image", request={}
+        )
+        store.conn.execute(
+            "UPDATE jobs SET updated_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00+00:00", job["id"]),
+        )
+        store.conn.commit()
+
+        cli.recover(force_reclaim=True, stale_seconds=300)
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+        assert output["force_reclaim"] is True
+        assert len(output["actions"]) >= 2
+
+        # The event is no longer stuck 'processing' with an expired lease --
+        # it's either back to pending, or explicitly failed with a message.
+        fresh_event = store.get_event(event["id"])
+        assert fresh_event["status"] in ("pending", "failed")
+
+        fresh_job = store.get_job(job["id"])
+        assert fresh_job["status"] == "failed"
+
+
+class TestRenderWaitCommands:
+    """Tests for `surface render` + `surface wait` (SPEC section 35)."""
+
+    def _write_data(self, tmp_path, data):
+        data_path = tmp_path / "data.json"
+        data_path.write_text(json.dumps(data))
+        return str(data_path)
+
+    def test_render_creates_pending_handle(self, cli_with_temp_db, tmp_path, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": ["q1"]})
+
+        cli.render("questionnaire", data=data_path)
+        captured = capsys.readouterr()
+        output = json.loads(captured.out)
+
+        assert output["status"] == "pending"
+        assert output["handle"].startswith("interaction_")
+
+        interaction_file = cli._interactions_dir() / f"{output['handle']}.json"
+        assert interaction_file.exists()
+        record = json.loads(interaction_file.read_text())
+        assert record["content"] == {"questions": ["q1"]}
+        assert record["status"] == "pending"
+
+    def test_render_missing_data_file_fails_cleanly(self, cli_with_temp_db, tmp_path, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+
+        cli.render("questionnaire", data=str(tmp_path / "nope.json"))
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "not found" in captured.err.lower()
+
+    def test_render_unknown_preset_fails_cleanly(self, cli_with_temp_db, tmp_path, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": []})
+
+        cli.render("totally_unknown_preset_xyz", data=data_path)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "error" in captured.err.lower()
+
+    def test_wait_pending_after_bound_elapses(self, cli_with_temp_db, tmp_path, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": ["q1"]})
+
+        cli.render("questionnaire", data=data_path)
+        handle = json.loads(capsys.readouterr().out)["handle"]
+
+        start = time.monotonic()
+        cli.wait(handle, max_seconds=0.3)
+        elapsed = time.monotonic() - start
+
+        output = json.loads(capsys.readouterr().out)
+        assert output == {"status": "pending", "handle": handle}
+        assert elapsed < 2.0  # bounded, fast
+
+    def test_wait_returns_answered_when_externally_answered(
+        self, cli_with_temp_db, tmp_path, capsys
+    ):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": ["q1"]})
+
+        cli.render("questionnaire", data=data_path)
+        handle = json.loads(capsys.readouterr().out)["handle"]
+
+        # Simulate an external "answer" being written by another process.
+        interaction_file = cli._interactions_dir() / f"{handle}.json"
+        record = json.loads(interaction_file.read_text())
+        record["status"] = "answered"
+        record["value"] = {"q1": "yes"}
+        interaction_file.write_text(json.dumps(record))
+
+        cli.wait(handle, max_seconds=0.5)
+        output = json.loads(capsys.readouterr().out)
+        assert output == {"status": "answered", "value": {"q1": "yes"}}
+
+    def test_wait_picks_up_late_answer_within_bound(self, cli_with_temp_db, tmp_path, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+        data_path = self._write_data(tmp_path, {"questions": ["q1"]})
+
+        cli.render("questionnaire", data=data_path)
+        handle = json.loads(capsys.readouterr().out)["handle"]
+        interaction_file = cli._interactions_dir() / f"{handle}.json"
+
+        def answer_soon():
+            time.sleep(0.15)
+            record = json.loads(interaction_file.read_text())
+            record["status"] = "answered"
+            record["value"] = {"q1": "no"}
+            interaction_file.write_text(json.dumps(record))
+
+        t = threading.Thread(target=answer_soon)
+        t.start()
+        cli.wait(handle, max_seconds=2.0)
+        t.join()
+
+        output = json.loads(capsys.readouterr().out)
+        assert output == {"status": "answered", "value": {"q1": "no"}}
+
+    def test_wait_unknown_handle_fails_cleanly(self, cli_with_temp_db, capsys):
+        cli = cli_with_temp_db
+        cli.get_store(create=True)
+
+        cli.wait("interaction_doesnotexist", max_seconds=0.2)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "unknown" in captured.err.lower() or "error" in captured.err.lower()
