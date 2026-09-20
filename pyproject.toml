@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-surface"
+version = "0.1.0"
+description = "Agent Surface Board: a portable, versioned, agent-driven review board runtime"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+board = ["gradio>=4.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+surface = "surface.cli:main"
+
+[tool.setuptools]
+packages = ["surface", "surface.transports", "surface.providers", "surface.stages"]
+
+[tool.setuptools.package-data]
+surface = ["stages/*.json"]
