@@ -130,9 +130,14 @@ class NativeStreamTransport:
                 "error": "Worker process is not running",
             }
 
-        # Construct the envelope to send to the worker
+        # Construct the envelope to send to the worker. "envelope" marks this
+        # as a transport-level event message; "type" carries the actual
+        # domain event type (edit/revise/approve/...) that the worker
+        # dispatches on — it must NOT be overwritten with a constant, or
+        # every real event arrives at the worker as an unrecognized type.
         envelope = {
-            "type": "event",
+            "envelope": "event",
+            "type": event_context.get("type"),
             "event_id": event_context.get("event_id"),
             "payload": event_context.get("payload", {}),
             "project_id": event_context.get("project_id"),

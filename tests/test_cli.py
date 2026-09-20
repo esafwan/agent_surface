@@ -6,7 +6,11 @@ Tests use temporary SQLite databases and direct function calls
 """
 
 import json
+import os
+import re
+import stat
 import tempfile
+import threading
 from pathlib import Path
 from io import StringIO
 import sys
@@ -503,6 +507,295 @@ class TestLifecycleCommands:
 
         assert output["ok"] is True
         assert "completed" in output["message"].lower()
+
+
+ECHO_WORKER_COMMAND = [
+    sys.executable,
+    "-c",
+    """
+import sys, json
+for line in sys.stdin:
+    try:
+        data = json.loads(line)
+        print(json.dumps({"ok": True, "result": {"processed": data.get("event_id")}}))
+        sys.stdout.flush()
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        sys.stdout.flush()
+""",
+]
+
+
+@pytest.fixture
+def serve_project(tmp_path, capsys):
+    """An initialized project ready for serve()."""
+    db_path = str(tmp_path / ".surface-board" / "state.sqlite3")
+    cli = SurfaceCLI(db_path=db_path)
+    cli.init(stage="movie", db=db_path)
+    capsys.readouterr()
+    return cli, db_path
+
+
+class TestServeRuntime:
+    """Tests for the wired-up `serve()` runtime (SPEC sections 9, 22, 36, 45)."""
+
+    def test_serve_dispatches_event_to_real_worker(self, serve_project, capsys):
+        """A pending event is claimed, sent to the worker subprocess, and acked."""
+        cli, db_path = serve_project
+        store = cli.get_store()
+        store.create_artifact(id="script_1", stage="script", title="Script")
+        event = store.enqueue_event(
+            type="user_note",
+            payload={"note": "hello"},
+            artifact_id="script_1",
+        )
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        output = json.loads(capsys.readouterr().out)
+
+        assert output["ok"] is True
+        assert output["iterations"] == 1
+
+        # The event genuinely reached a worker and was acked afterwards.
+        cursor = store.conn.cursor()
+        cursor.execute("SELECT status FROM events WHERE id = ?", (event["id"],))
+        assert cursor.fetchone()[0] == "acked"
+
+    def test_serve_poller_advances_jobs(self, serve_project, capsys):
+        """poll_once() runs each iteration, so async jobs actually progress."""
+        cli, db_path = serve_project
+        store = cli.get_store()
+        store.create_artifact(id="shot_1", stage="shots", title="Shot")
+        job = store.create_job(
+            artifact_id="shot_1",
+            provider="image_default",
+            kind="image",
+            request={"prompt": "a cat"},
+        )
+        assert job["status"] == "queued"
+
+        cli.serve(
+            db=db_path,
+            max_iterations=5,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        capsys.readouterr()
+
+        updated = store.get_job(job["id"])
+        assert updated["status"] == "succeeded", updated
+        assert updated["provider_job_id"]
+
+    def test_serve_writes_runtime_token_port_and_pids(self, serve_project, capsys):
+        """SPEC section 9: run/{token,port,board.pid,supervisor.pid,poller.pid}."""
+        cli, db_path = serve_project
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+        )
+        capsys.readouterr()
+
+        run_dir = Path(db_path).resolve().parent / "run"
+        token_file = run_dir / "token"
+        port_file = run_dir / "port"
+
+        assert token_file.exists()
+        assert port_file.exists()
+        assert (run_dir / "supervisor.pid").read_text() == str(os.getpid())
+        assert (run_dir / "poller.pid").read_text() == str(os.getpid())
+
+        token = token_file.read_text()
+        # Unpredictable: secrets.token_urlsafe(32) -> >= 40 urlsafe chars.
+        assert len(token) >= 40
+        assert token not in ("", "token", "surface", "changeme", "default")
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", token)
+        assert cli.runtime_info["token"] == token
+
+        # Restrictive permissions on the secret (SPEC section 9).
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+        port = int(port_file.read_text())
+        assert 1024 < port < 65536
+        assert cli.runtime_info["port"] == port
+
+    def test_serve_tokens_differ_between_runs(self, serve_project, capsys):
+        """The board credential is per-run, not a fixed default."""
+        cli, db_path = serve_project
+        tokens = set()
+        for _ in range(2):
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=False,
+                worker_command=ECHO_WORKER_COMMAND,
+                keep_runtime_files=True,
+            )
+            capsys.readouterr()
+            tokens.add(cli.runtime_info["token"])
+        assert len(tokens) == 2
+
+    def test_serve_clears_runtime_files_on_shutdown(self, serve_project, capsys):
+        """SPEC section 45: clean shutdown invalidates pid/token files."""
+        cli, db_path = serve_project
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        capsys.readouterr()
+
+        run_dir = Path(db_path).resolve().parent / "run"
+        for name in ("token", "port", "board.pid", "supervisor.pid", "poller.pid"):
+            assert not (run_dir / name).exists(), name
+
+    def test_serve_respects_runtime_dir_override(self, serve_project, tmp_path, capsys):
+        cli, db_path = serve_project
+        custom = tmp_path / "custom-run"
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            runtime_dir=str(custom),
+            keep_runtime_files=True,
+        )
+        output = json.loads(capsys.readouterr().out)
+
+        assert output["runtime_dir"] == str(custom)
+        assert (custom / "token").exists()
+
+    def test_serve_without_gradio_does_not_crash(self, serve_project, monkeypatch, capsys):
+        """build_board() returning None must not break the supervisor loop."""
+        cli, db_path = serve_project
+        monkeypatch.setattr(cli, "_build_board_blocks", lambda store, cfg: None)
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        output = json.loads(capsys.readouterr().out)
+
+        assert output["ok"] is True
+        assert output["board"] == "unavailable"
+        assert output["iterations"] == 1
+
+    def test_serve_survives_missing_gradio_import(self, serve_project, monkeypatch, capsys):
+        """An ImportError from the board module is logged, not raised."""
+        cli, db_path = serve_project
+
+        def _boom(store, cfg):
+            raise ImportError("No module named 'gradio'")
+
+        monkeypatch.setattr(cli, "_build_board_blocks", _boom)
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert output["ok"] is True
+        assert output["board"] == "unavailable"
+
+    def test_serve_launches_board_when_available(self, serve_project, monkeypatch, capsys):
+        """When build_board returns Blocks, launch() is called on loopback with auth."""
+        cli, db_path = serve_project
+        launched = {}
+        done = threading.Event()
+
+        class FakeBlocks:
+            def launch(self, **kwargs):
+                launched.update(kwargs)
+                done.set()
+
+        monkeypatch.setattr(cli, "_build_board_blocks", lambda store, cfg: FakeBlocks())
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+        )
+        output = json.loads(capsys.readouterr().out)
+
+        assert done.wait(5), "board thread never launched"
+        assert output["board"] == "running"
+        assert launched["server_name"] == "127.0.0.1"
+        assert launched["share"] is False
+        # SPEC section 36: authenticated, with the runtime token as credential.
+        assert launched["auth"] == ("surface", cli.runtime_info["token"])
+        assert launched["server_port"] == cli.runtime_info["port"]
+
+        run_dir = Path(db_path).resolve().parent / "run"
+        assert (run_dir / "board.pid").read_text() == str(os.getpid())
+
+    def test_serve_max_iterations_bounds_the_loop(self, serve_project, capsys):
+        cli, db_path = serve_project
+        cli.serve(
+            db=db_path,
+            max_iterations=3,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert output["iterations"] == 3
+
+    def test_serve_run_once_bounds_the_loop(self, serve_project, capsys):
+        cli, db_path = serve_project
+        cli.serve(
+            db=db_path,
+            run_once=True,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert output["iterations"] == 1
+
+    def test_serve_default_worker_command_targets_worker_module(self, serve_project, capsys):
+        """Without an override, the transport spawns `python -m surface.worker`."""
+        cli, db_path = serve_project
+        captured = {}
+
+        import surface.cli as cli_module
+        real_transport = cli_module.NativeStreamTransport
+
+        def _spy(command=None, **kwargs):
+            captured["command"] = command
+            return real_transport(command=ECHO_WORKER_COMMAND, **kwargs)
+
+        cli_module.NativeStreamTransport = _spy
+        try:
+            cli.serve(db=db_path, max_iterations=1, board=False)
+        finally:
+            cli_module.NativeStreamTransport = real_transport
+        capsys.readouterr()
+
+        assert captured["command"][0] == sys.executable
+        assert captured["command"][1:3] == ["-m", "surface.worker"]
+        assert captured["command"][3] == "--db"
+        assert captured["command"][4].endswith("state.sqlite3")
+
+    def test_serve_requires_initialized_store(self, tmp_path, capsys):
+        cli = SurfaceCLI(db_path=str(tmp_path / "missing" / "state.sqlite3"))
+        cli.serve(max_iterations=1, board=False)
+        captured = capsys.readouterr()
+        assert "No store" in captured.err
 
 
 class TestErrorHandling:

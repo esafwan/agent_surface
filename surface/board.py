@@ -5,12 +5,13 @@ Core logic is in pure Python classes/functions that don't depend on gradio.
 Gradio-specific wiring is in separate section at end.
 """
 import json
+import hashlib
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from surface.store import Store
-from surface.stages.config import StageConfig
+from surface.stages.config import StageConfig, ActionPermissionError
 
 
 # =============================================================================
@@ -298,8 +299,46 @@ class ActionClassification:
 class ActionHandler:
     """Handles board actions."""
 
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, stage_config: Optional[StageConfig] = None):
         self.store = store
+        self.stage_config = stage_config
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    def _compute_dedupe_key(self, artifact_id: str, action_type: str, content: Optional[str] = None) -> str:
+        """
+        Compute a deterministic dedupe key from artifact_id, action_type, and content.
+        The key is based on the actual submitted content so identical resubmissions dedupe,
+        but different content creates different events.
+        """
+        key_parts = [artifact_id, action_type]
+        if content:
+            key_parts.append(content)
+        key_str = "|".join(key_parts)
+        return hashlib.sha256(key_str.encode()).hexdigest()[:16]
+
+    def _validate_action_allowed(self, artifact_id: str, action: str) -> Optional[str]:
+        """
+        Validate that an action is allowed for the artifact's stage.
+        Returns error message if validation fails, None if valid.
+        """
+        if not self.stage_config:
+            return None  # No stage config, skip validation
+
+        artifact = self.store.get_artifact(artifact_id)
+        if not artifact:
+            return f"Artifact {artifact_id} not found"
+
+        try:
+            stage = self.stage_config.get_stage(artifact["stage"])
+            stage.validate_action(action)
+            return None  # Action is valid
+        except ActionPermissionError as e:
+            return str(e)
+        except KeyError:
+            return f"Stage {artifact['stage']} not found in config"
 
     # =========================================================================
     # Deterministic Actions (call store directly)
@@ -314,24 +353,69 @@ class ActionHandler:
         """
         Select a version (deterministic).
         Triggers DAG stale propagation.
+        Gates on allowed_actions.
         """
+        # Validate action is allowed
+        error = self._validate_action_allowed(artifact_id, "select_version")
+        if error:
+            return {"ok": False, "error": error}
+
         result = self.store.select_version(
             artifact_id, version_id, expected_selected_version_id
         )
-        return {
+        response = {
             "ok": result.get("ok", False),
             "error": result.get("error"),
             "stale_descendants": result.get("stale_descendants", []),
         }
+        # Pass through current_selected_version_id on conflict
+        if "current_selected_version_id" in result:
+            response["current_selected_version_id"] = result["current_selected_version_id"]
+        return response
 
-    def approve(self, artifact_id: str) -> Dict[str, Any]:
+    def approve(self, artifact_id: str, force: bool = False) -> Dict[str, Any]:
         """
         Approve an artifact (deterministic).
         Direct status update to 'approved'.
+        Validates: approval_required flag, locked status, terminal states.
+
+        Args:
+            artifact_id: ID of artifact to approve
+            force: If True, skip locked check (requires explicit confirmation)
         """
         artifact = self.store.get_artifact(artifact_id)
         if not artifact:
             return {"ok": False, "error": f"Artifact {artifact_id} not found"}
+
+        # Validate action is allowed
+        error = self._validate_action_allowed(artifact_id, "approve")
+        if error:
+            return {"ok": False, "error": error}
+
+        # Check if artifact is locked
+        if artifact.get("locked"):
+            if not force:
+                return {
+                    "ok": False,
+                    "error": "approval_blocked_by_lock",
+                    "message": "Artifact is locked. Use force=True to override."
+                }
+
+        # Per SPEC section 11: approved MAY be reopened, so most states are ok to approve.
+        # But reject already-approved (idempotent but explicit), or terminal states like failed/cancelled
+        current_status = artifact.get("status")
+        if current_status == "failed":
+            return {
+                "ok": False,
+                "error": "approval_blocked_by_failed_status",
+                "message": "Cannot approve a failed artifact."
+            }
+        if current_status == "cancelled":
+            return {
+                "ok": False,
+                "error": "approval_blocked_by_cancelled_status",
+                "message": "Cannot approve a cancelled artifact."
+            }
 
         result = self.store.set_status(artifact_id, "approved")
         return {"ok": True, "artifact": result}
@@ -368,12 +452,15 @@ class ActionHandler:
         """
         Queue an edit action (requires worker).
         For direct content updates (text/form).
+        Idempotent: identical content dedupes at store level.
         """
+        dedupe_key = self._compute_dedupe_key(artifact_id, "edit", content)
         payload = {"content": content}
         event = self.store.enqueue_event(
             type="edit",
             payload=payload,
             artifact_id=artifact_id,
+            dedupe_key=dedupe_key,
         )
         return {
             "ok": True,
@@ -385,12 +472,15 @@ class ActionHandler:
         """
         Queue a revise action (requires worker).
         For generation revision prompts (image/video).
+        Idempotent: identical note dedupes at store level.
         """
+        dedupe_key = self._compute_dedupe_key(artifact_id, "revise", note)
         payload = {"note": note}
         event = self.store.enqueue_event(
             type="revise",
             payload=payload,
             artifact_id=artifact_id,
+            dedupe_key=dedupe_key,
         )
         return {
             "ok": True,
@@ -402,12 +492,15 @@ class ActionHandler:
         """
         Queue a regenerate action (requires worker).
         For retriggering generation from current version.
+        Idempotent: no content to dedupe, key is deterministic per artifact.
         """
+        dedupe_key = self._compute_dedupe_key(artifact_id, "regenerate")
         payload = {}
         event = self.store.enqueue_event(
             type="regenerate",
             payload=payload,
             artifact_id=artifact_id,
+            dedupe_key=dedupe_key,
         )
         return {
             "ok": True,
@@ -419,12 +512,15 @@ class ActionHandler:
         """
         Queue a reopen action (requires worker).
         Move from 'approved' back to 'draft' for further work.
+        Idempotent: no content to dedupe.
         """
+        dedupe_key = self._compute_dedupe_key(artifact_id, "reopen")
         payload = {}
         event = self.store.enqueue_event(
             type="reopen",
             payload=payload,
             artifact_id=artifact_id,
+            dedupe_key=dedupe_key,
         )
         return {
             "ok": True,
@@ -436,12 +532,15 @@ class ActionHandler:
         """
         Queue a cancel action (requires worker).
         Requests cancellation of in-progress generation.
+        Idempotent: no content to dedupe.
         """
+        dedupe_key = self._compute_dedupe_key(artifact_id, "cancel")
         payload = {}
         event = self.store.enqueue_event(
             type="cancel",
             payload=payload,
             artifact_id=artifact_id,
+            dedupe_key=dedupe_key,
         )
         return {
             "ok": True,
@@ -453,12 +552,22 @@ class ActionHandler:
         """
         Queue a free-form message (requires worker).
         Can be artifact-scoped or project-wide.
+        Idempotent: identical text dedupes at store level.
         """
+        # For messages, include artifact_id if provided in the dedupe key
+        key_parts = ["message"]
+        if artifact_id:
+            key_parts.append(artifact_id)
+        key_parts.append(text)
+        key_str = "|".join(key_parts)
+        dedupe_key = hashlib.sha256(key_str.encode()).hexdigest()[:16]
+
         payload = {"text": text}
         event = self.store.enqueue_event(
             type="message",
             payload=payload,
             artifact_id=artifact_id,
+            dedupe_key=dedupe_key,
         )
         return {
             "ok": True,
@@ -507,19 +616,34 @@ except ImportError:
     HAS_GRADIO = False
 
 
-def build_board(store: Store, stage_config: StageConfig) -> Optional[Any]:
+def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str] = None) -> Optional[Any]:
     """
     Build a Gradio Blocks UI for the board.
     Returns None if gradio is not available.
+
+    Args:
+        store: SQLite artifact store
+        stage_config: Stage configuration
+        media_dir: Base directory for media file resolution (default: None, treat content_ref as absolute)
     """
     if not HAS_GRADIO:
         return None
 
     display_builder = DisplayModelBuilder(store, stage_config)
-    action_handler = ActionHandler(store)
+    action_handler = ActionHandler(store, stage_config)
 
     # Initial board state
     board_display = display_builder.build_board_display()
+
+    def _resolve_media_path(content_ref: Optional[str]) -> Optional[str]:
+        """Resolve media path for display, accounting for media_dir if set."""
+        if not content_ref:
+            return None
+        if media_dir and not content_ref.startswith("/"):
+            # Relative path: resolve against media_dir
+            from pathlib import Path
+            return str(Path(media_dir) / content_ref)
+        return content_ref
 
     def refresh_board() -> Tuple[str, str, str]:
         """Refresh board state from store."""
@@ -529,14 +653,15 @@ def build_board(store: Store, stage_config: StageConfig) -> Optional[Any]:
         artifacts_json = json.dumps(display.to_dict(), indent=2)
         return title, status, artifacts_json
 
-    def handle_approve_artifact(artifact_id: str) -> str:
+    def handle_approve_artifact(artifact_id: str, force_unlock: bool = False) -> str:
         """Handle approve action."""
-        result = action_handler.approve(artifact_id)
+        force = force_unlock  # User confirmed override if true
+        result = action_handler.approve(artifact_id, force=force)
         return json.dumps(result)
 
-    def handle_select_version(artifact_id: str, version_id: str) -> str:
-        """Handle select_version action."""
-        result = action_handler.select_version(artifact_id, version_id)
+    def handle_select_version(artifact_id: str, version_id: str, expected_selected_version_id: Optional[str] = None) -> str:
+        """Handle select_version action with optimistic concurrency."""
+        result = action_handler.select_version(artifact_id, version_id, expected_selected_version_id)
         return json.dumps(result)
 
     def handle_lock_artifact(artifact_id: str) -> str:
@@ -625,7 +750,7 @@ def build_board(store: Store, stage_config: StageConfig) -> Optional[Any]:
                                     if artifact_card.status == "stale":
                                         gr.Label(value="⚠️ Stale")
 
-                                # Selected version display
+                                # Selected version display (with media rendering)
                                 if artifact_card.selected_version:
                                     sel_ver = artifact_card.selected_version
                                     with gr.Group():
@@ -635,6 +760,49 @@ def build_board(store: Store, stage_config: StageConfig) -> Optional[Any]:
                                             label="Version",
                                             interactive=False,
                                         )
+
+                                        # Render version content based on type
+                                        content_type, content_value = render_version_content(sel_ver)
+                                        if content_type == "image":
+                                            resolved_path = _resolve_media_path(content_value)
+                                            if resolved_path:
+                                                gr.Image(
+                                                    value=resolved_path,
+                                                    label="Image Content",
+                                                    interactive=False,
+                                                )
+                                        elif content_type == "video":
+                                            resolved_path = _resolve_media_path(content_value)
+                                            if resolved_path:
+                                                gr.Video(
+                                                    value=resolved_path,
+                                                    label="Video Content",
+                                                    interactive=False,
+                                                )
+                                        elif content_type == "audio":
+                                            resolved_path = _resolve_media_path(content_value)
+                                            if resolved_path:
+                                                gr.Audio(
+                                                    value=resolved_path,
+                                                    label="Audio Content",
+                                                    interactive=False,
+                                                )
+                                        elif content_type == "text" and content_value:
+                                            # Show text content
+                                            if len(content_value) > 500:
+                                                gr.Textbox(
+                                                    value=content_value,
+                                                    label="Content",
+                                                    interactive=False,
+                                                    lines=8,
+                                                )
+                                            else:
+                                                gr.Textbox(
+                                                    value=content_value,
+                                                    label="Content",
+                                                    interactive=False,
+                                                )
+
                                         if sel_ver.prompt:
                                             gr.Textbox(
                                                 value=sel_ver.prompt,
@@ -648,8 +816,8 @@ def build_board(store: Store, stage_config: StageConfig) -> Optional[Any]:
                                                 interactive=False,
                                             )
 
-                                # Version history
-                                if len(artifact_card.all_versions) > 1:
+                                # Version history (gated on select_version in allowed_actions)
+                                if len(artifact_card.all_versions) > 1 and "select_version" in artifact_card.allowed_actions:
                                     with gr.Group():
                                         gr.Markdown("#### Version History")
                                         for version in artifact_card.all_versions:
@@ -659,35 +827,59 @@ def build_board(store: Store, stage_config: StageConfig) -> Optional[Any]:
                                                     scale=1,
                                                     interactive=False,
                                                 )
-                                                btn_select = gr.Button(
-                                                    "Select" if not version.is_selected else "Selected",
-                                                    scale=1,
-                                                )
-                                                btn_select.click(
-                                                    handle_select_version,
-                                                    inputs=[
-                                                        gr.Textbox(
-                                                            value=artifact_card.artifact_id,
-                                                            visible=False,
-                                                        ),
-                                                        gr.Textbox(
-                                                            value=version.version_id,
-                                                            visible=False,
-                                                        ),
-                                                    ],
-                                                    outputs=gr.Textbox(visible=False),
-                                                )
+                                                # Only show select button if action is allowed and version is not already selected
+                                                if not version.is_selected:
+                                                    btn_select = gr.Button(
+                                                        "Select",
+                                                        scale=1,
+                                                    )
+                                                    # Pass expected_selected_version_id from current display state
+                                                    btn_select.click(
+                                                        handle_select_version,
+                                                        inputs=[
+                                                            gr.Textbox(
+                                                                value=artifact_card.artifact_id,
+                                                                visible=False,
+                                                            ),
+                                                            gr.Textbox(
+                                                                value=version.version_id,
+                                                                visible=False,
+                                                            ),
+                                                            gr.Textbox(
+                                                                value=artifact_card.selected_version.version_id if artifact_card.selected_version else "",
+                                                                visible=False,
+                                                            ),
+                                                        ],
+                                                        outputs=gr.Textbox(visible=False),
+                                                    )
+                                                else:
+                                                    gr.Button(
+                                                        "Selected",
+                                                        scale=1,
+                                                        interactive=False,
+                                                    )
 
                                 # Action buttons
                                 with gr.Row():
+                                    # Approve button (gated on allowed_actions and not locked)
                                     if "approve" in artifact_card.allowed_actions:
-                                        btn_approve = gr.Button("Approve")
+                                        approve_label = "Approve (Locked)" if artifact_card.locked else "Approve"
+                                        btn_approve = gr.Button(
+                                            approve_label,
+                                            interactive=not artifact_card.locked,
+                                        )
                                         btn_approve.click(
                                             handle_approve_artifact,
-                                            inputs=gr.Textbox(
-                                                value=artifact_card.artifact_id,
-                                                visible=False,
-                                            ),
+                                            inputs=[
+                                                gr.Textbox(
+                                                    value=artifact_card.artifact_id,
+                                                    visible=False,
+                                                ),
+                                                gr.Checkbox(
+                                                    value=False,
+                                                    visible=False,
+                                                ),
+                                            ],
                                             outputs=gr.Textbox(visible=False),
                                         )
 

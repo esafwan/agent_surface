@@ -8,10 +8,17 @@ Per SPEC section 17 (Store/Inbox Tools CLI) and section 9 (Runtime Directory).
 """
 
 import argparse
+import importlib.util
+import inspect
 import json
 import logging
+import os
 import re
+import secrets
+import signal
+import socket
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +46,9 @@ class SurfaceCLI:
         self.db_path = db_path
         self.store: Optional[Store] = None
         self.project_dir = Path(".surface-board")
+        # Populated by serve(): {"runtime_dir", "token", "port", "host"}.
+        self.runtime_info: Optional[Dict[str, Any]] = None
+        self._board_thread: Optional[threading.Thread] = None
 
     def get_store(self, create: bool = False) -> Optional[Store]:
         """Get or create a store instance. Returns None if DB doesn't exist and create=False."""
@@ -459,13 +469,145 @@ class SurfaceCLI:
 
         self._json_output(result)
 
+    # =========================================================================
+    # Runtime Directory (SPEC section 9)
+    # =========================================================================
+
+    def runtime_dir(self, runtime_dir: Optional[str] = None) -> Path:
+        """Resolve the runtime directory (`.surface-board/run` by default).
+
+        Per SPEC section 9 the runtime directory lives next to the store:
+        `<project>/.surface-board/run/{board.pid, supervisor.pid, poller.pid,
+        token, port}`.
+        """
+        if runtime_dir:
+            return Path(runtime_dir)
+        return Path(self.db_path).resolve().parent / "run"
+
+    @staticmethod
+    def _write_runtime_file(run_dir: Path, name: str, value: str,
+                            secret: bool = False) -> Path:
+        """Write a single runtime file with restrictive permissions."""
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(run_dir, 0o700)
+        except OSError:
+            pass
+        path = run_dir / name
+        path.write_text(str(value))
+        # SPEC section 9: runtime token files SHOULD use restrictive permissions.
+        try:
+            os.chmod(path, 0o600 if secret else 0o644)
+        except OSError:
+            pass
+        return path
+
+    @staticmethod
+    def _clear_runtime_files(run_dir: Path) -> None:
+        """Remove pid/token/port files on clean shutdown (SPEC section 45)."""
+        for name in ("board.pid", "supervisor.pid", "poller.pid", "token", "port"):
+            try:
+                (run_dir / name).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:  # pragma: no cover - defensive
+                logger.warning(f"Could not remove runtime file {name}: {e}")
+
+    @staticmethod
+    def _reserve_port(host: str, port: int = 0) -> int:
+        """Resolve a concrete port to bind the board to.
+
+        Binding to port 0 and immediately releasing lets us record the resolved
+        port in `.surface-board/run/port` before the board actually binds it.
+        """
+        if port:
+            return port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, 0))
+            return sock.getsockname()[1]
+
+    def _build_board_blocks(self, store: Store, stage_config: StageConfig) -> Any:
+        """Call build_board with whatever signature it currently exposes."""
+        from surface.board import build_board
+
+        kwargs: Dict[str, Any] = {}
+        params = inspect.signature(build_board).parameters
+        if "media_dir" in params:
+            kwargs["media_dir"] = str(Path(self.db_path).resolve().parent / "media")
+        return build_board(store, stage_config, **kwargs)
+
+    def _launch_board(self, stage_config: StageConfig, host: str, port: int,
+                      token: str, run_dir: Path) -> bool:
+        """Launch the Gradio board in a daemon thread.
+
+        Returns True if a board was launched, False if Gradio is unavailable.
+
+        The board gets its own Store (its own sqlite3 connection), because
+        sqlite3 connections are not shareable across threads.
+        """
+        try:
+            board_store = Store(self.db_path)
+            blocks = self._build_board_blocks(board_store, stage_config)
+        except ImportError:
+            logger.warning("Board UI unavailable: gradio is not installed")
+            return False
+        except Exception as e:
+            logger.warning(f"Board UI unavailable: {e}")
+            return False
+
+        if blocks is None:
+            logger.warning(
+                "Board UI unavailable (gradio not installed); "
+                "running supervisor + poller only"
+            )
+            return False
+
+        def _run() -> None:
+            try:
+                # SPEC section 36: bind loopback by default and require auth.
+                blocks.launch(
+                    server_name=host,
+                    server_port=port,
+                    auth=("surface", token),
+                    share=False,
+                    quiet=True,
+                    show_error=True,
+                    prevent_thread_lock=False,
+                )
+            except Exception as e:  # pragma: no cover - depends on gradio
+                logger.error(f"Board failed to launch: {e}")
+
+        thread = threading.Thread(target=_run, name="surface-board", daemon=True)
+        thread.start()
+        self._board_thread = thread
+        # The board runs in this process, so board.pid is our pid.
+        self._write_runtime_file(run_dir, "board.pid", str(os.getpid()))
+        logger.info(f"Board listening on http://{host}:{port} (basic auth user 'surface')")
+        return True
+
     def serve(self, db: Optional[str] = None, stage: str = "movie",
-              run_once: bool = False, supervisor_iterations: int = 1) -> None:
+              run_once: bool = False,
+              supervisor_iterations: Optional[int] = None,
+              max_iterations: Optional[int] = None,
+              runtime_dir: Optional[str] = None,
+              host: str = "127.0.0.1",
+              port: int = 0,
+              board: bool = True,
+              worker_command: Optional[List[str]] = None,
+              transport: Optional[Any] = None,
+              poll_interval: float = 0.5,
+              keep_runtime_files: bool = False) -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
-        For Phase 0 testing, this can run a bounded number of iterations
-        instead of an infinite loop. Use run_once=True or set
-        supervisor_iterations to control loop exit.
+        Architecture (single process):
+          * the Gradio board runs in a daemon thread with its own Store
+            connection and HTTP basic auth bound to loopback;
+          * the supervisor + poller cycle runs on the main thread;
+          * the worker runs as a real subprocess spawned by
+            NativeStreamTransport (`python -m surface.worker --db <path>`).
+
+        Bounded runs (`--max-iterations` / `--run-once`) exist so tests and
+        scripted use do not block; with no bound the loop runs until SIGINT.
         """
         if db:
             self.db_path = db
@@ -475,13 +617,22 @@ class SurfaceCLI:
             self._error(f"No store at {self.db_path}. Use 'surface init' first.")
             return
 
-        # Load store
         store = self.get_store()
         if not store:
             self._error("Could not open store")
             return
 
-        # Load stage config
+        # Resolve the iteration bound. `supervisor_iterations` is the legacy
+        # flag name; `max_iterations` is the spelling used by the CLI now.
+        bound = max_iterations if max_iterations is not None else supervisor_iterations
+        if run_once:
+            bound = 1
+
+        run_dir = self.runtime_dir(runtime_dir)
+        supervisor: Optional[Supervisor] = None
+        board_launched = False
+        iterations = 0
+
         try:
             cursor = store.conn.cursor()
             cursor.execute("SELECT value_json FROM kv_state WHERE key = ?", ("stage_config",))
@@ -497,56 +648,117 @@ class SurfaceCLI:
                 self._error(f"Invalid stage config: {e}")
                 return
 
-            # Set up providers
+            cursor.execute("SELECT value_json FROM kv_state WHERE key = ?", ("project_id",))
+            project_row = cursor.fetchone()
+            project_id = json.loads(project_row[0]) if project_row else "default"
+
+            # -----------------------------------------------------------------
+            # Runtime directory: token + port + pids (SPEC section 9)
+            # -----------------------------------------------------------------
+            # SPEC section 36: Phase 0 must prove one authenticated remote path.
+            # The board is served over HTTP basic auth with an unpredictable
+            # per-run token as the password; the token never appears in a URL.
+            token = secrets.token_urlsafe(32)
+            resolved_port = self._reserve_port(host, port)
+            self._write_runtime_file(run_dir, "token", token, secret=True)
+            self._write_runtime_file(run_dir, "port", str(resolved_port))
+            self._write_runtime_file(run_dir, "supervisor.pid", str(os.getpid()))
+            self._write_runtime_file(run_dir, "poller.pid", str(os.getpid()))
+            self.runtime_info = {
+                "runtime_dir": str(run_dir),
+                "token": token,
+                "port": resolved_port,
+                "host": host,
+            }
+
+            # -----------------------------------------------------------------
+            # Poller with the mock Phase 0 providers (names match movie.json)
+            # -----------------------------------------------------------------
             providers = {
                 "image_default": MockImageProvider(),
                 "video_default": MockVideoProvider(),
             }
-
-            # Create poller
             poller = Poller(store, providers)
 
-            # Create supervisor with a native stream transport
-            transport = NativeStreamTransport()
+            # -----------------------------------------------------------------
+            # Supervisor over a real worker subprocess
+            # -----------------------------------------------------------------
+            if transport is None:
+                command = worker_command or [
+                    sys.executable,
+                    "-m",
+                    "surface.worker",
+                    "--db",
+                    str(Path(self.db_path).resolve()),
+                ]
+                if worker_command is None and importlib.util.find_spec("surface.worker") is None:
+                    logger.warning(
+                        "surface.worker module not found; worker dispatch will fail "
+                        "until it exists (expected: python -m surface.worker --db <path>)"
+                    )
+                transport = NativeStreamTransport(command=command)
+
             supervisor_config = SupervisorConfig(
                 worker_id="cli_worker",
                 lease_seconds=60,
                 turn_timeout=300,
             )
-            supervisor = Supervisor(store, transport, stage_config, supervisor_config)
+            supervisor = Supervisor(
+                store, transport, stage_config, supervisor_config,
+                project_id=project_id,
+            )
 
-            # Try to load Gradio board
+            # -----------------------------------------------------------------
+            # Board (daemon thread, own store connection)
+            # -----------------------------------------------------------------
+            if board:
+                board_launched = self._launch_board(
+                    stage_config, host, resolved_port, token, run_dir
+                )
+            else:
+                logger.info("Board disabled by --no-board")
+
+            # -----------------------------------------------------------------
+            # Supervisor + poller loop
+            # -----------------------------------------------------------------
+            stop_event = threading.Event()
+
+            def _handle_sigint(signum, frame):  # pragma: no cover - signal path
+                logger.info("Received interrupt; shutting down")
+                stop_event.set()
+
+            previous_handler = None
+            installed_handler = False
             try:
-                from surface.board import build_board
-                board = build_board(store, stage_config)
-                if board:
-                    logger.info("Board UI loaded (Gradio available)")
-                else:
-                    logger.info("Board UI not available (Gradio not installed)")
-            except (ImportError, Exception):
-                logger.info("Gradio not installed; board UI unavailable")
+                previous_handler = signal.getsignal(signal.SIGINT)
+                signal.signal(signal.SIGINT, _handle_sigint)
+                installed_handler = True
+            except ValueError:
+                # Not on the main thread; rely on KeyboardInterrupt instead.
+                pass
 
-            # Main loop
-            logger.info(f"Starting supervisor loop (will run {supervisor_iterations} iteration(s))...")
-            for i in range(supervisor_iterations):
-                logger.info(f"Supervisor iteration {i+1}/{supervisor_iterations}")
+            if bound is None:
+                logger.info("Starting supervisor loop (until interrupted)...")
+            else:
+                logger.info(f"Starting supervisor loop ({bound} iteration(s))...")
 
-                # Try to start worker
-                supervisor.start_worker()
-
-                # Claim and process one event
-                event = store.claim_next_event("cli_worker")
-                if event:
-                    logger.info(f"Processing event: {event['id']}")
-                    # In Phase 0, we just ack it after reading
-                    store.ack_event(event["id"])
-                else:
-                    logger.info("No pending events")
-
-                # Poll for job completions
-                jobs_processed = poller.poll_once()
-                if jobs_processed > 0:
-                    logger.info(f"Poller processed {jobs_processed} job(s)")
+            try:
+                while not stop_event.is_set() and (bound is None or iterations < bound):
+                    supervisor.claim_and_dispatch_event()
+                    jobs_processed = poller.poll_once()
+                    if jobs_processed:
+                        logger.info(f"Poller processed {jobs_processed} job(s)")
+                    iterations += 1
+                    if bound is None:
+                        stop_event.wait(poll_interval)
+            except KeyboardInterrupt:  # pragma: no cover - signal path
+                logger.info("Supervisor loop interrupted")
+            finally:
+                if installed_handler and previous_handler is not None:
+                    try:
+                        signal.signal(signal.SIGINT, previous_handler)
+                    except ValueError:
+                        pass
 
             logger.info("Supervisor loop completed")
 
@@ -554,10 +766,30 @@ class SurfaceCLI:
                 "ok": True,
                 "message": "Board runtime completed",
                 "stage": stage_config.id,
+                "iterations": iterations,
+                "board": "running" if board_launched else "unavailable",
+                "host": host,
+                "port": resolved_port,
+                "runtime_dir": str(run_dir),
             })
         except Exception as e:
             logger.exception(f"Error in serve: {e}")
             self._error(f"Error starting board runtime: {e}")
+        finally:
+            # SPEC section 45: clean shutdown stops the worker, closes the
+            # transport, and invalidates the runtime pid/token files.
+            if supervisor is not None:
+                try:
+                    supervisor.stop_worker()
+                except Exception as e:
+                    logger.warning(f"Error stopping worker: {e}")
+                for session in list(getattr(supervisor.transport, "sessions", {}).values()):
+                    try:
+                        supervisor.transport.close(session)
+                    except Exception:
+                        pass
+            if not keep_runtime_files:
+                self._clear_runtime_files(run_dir)
 
     # =========================================================================
     # Utilities
@@ -714,17 +946,14 @@ def main():
     init_parser.add_argument(
         "--stage", default="movie", help="Stage config to use (default: movie)"
     )
-    init_parser.add_argument(
-        "--db", help="Override DB path"
-    )
+    # NOTE: --db is a global option (see `parser.add_argument("--db", ...)`
+    # above); it must not be redeclared per-subcommand with a different
+    # default (e.g. None) or it clobbers the global default in args.db.
 
     status_parser = subparsers.add_parser("status", help="Get project status")
 
     serve_parser = subparsers.add_parser(
         "serve", help="Start the board runtime (store, supervisor, poller, board)"
-    )
-    serve_parser.add_argument(
-        "--db", help="Override DB path"
     )
     serve_parser.add_argument(
         "--stage", default="movie", help="Stage config (default: movie)"
@@ -735,8 +964,40 @@ def main():
     serve_parser.add_argument(
         "--supervisor-iterations",
         type=int,
-        default=1,
-        help="Number of supervisor loop iterations (default: 1)",
+        default=None,
+        help="Legacy alias for --max-iterations",
+    )
+    serve_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Bound the supervisor/poller loop to N iterations "
+             "(default: unbounded, runs until Ctrl-C)",
+    )
+    serve_parser.add_argument(
+        "--runtime-dir",
+        default=None,
+        help="Override the runtime directory (default: <db dir>/run)",
+    )
+    serve_parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Board bind address (default: 127.0.0.1, loopback per SPEC s36)",
+    )
+    serve_parser.add_argument(
+        "--port", type=int, default=0,
+        help="Board port (default: 0 = pick a free port)",
+    )
+    serve_parser.add_argument(
+        "--no-board", dest="board", action="store_false", default=True,
+        help="Run supervisor + poller only; do not launch the board UI",
+    )
+    serve_parser.add_argument(
+        "--poll-interval", type=float, default=0.5,
+        help="Seconds to sleep between unbounded loop iterations (default: 0.5)",
+    )
+    serve_parser.add_argument(
+        "--keep-runtime-files", action="store_true",
+        help="Do not delete run/{token,port,*.pid} on shutdown",
     )
 
     # Parse arguments
@@ -800,6 +1061,13 @@ def main():
             stage=args.stage,
             run_once=args.run_once,
             supervisor_iterations=args.supervisor_iterations,
+            max_iterations=args.max_iterations,
+            runtime_dir=args.runtime_dir,
+            host=args.host,
+            port=args.port,
+            board=args.board,
+            poll_interval=args.poll_interval,
+            keep_runtime_files=args.keep_runtime_files,
         )
 
     else:

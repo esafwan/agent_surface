@@ -167,7 +167,8 @@ class TestNativeStreamTransportSendEvent:
         assert result["ok"] is True
         # Echo worker returns the envelope as-is in result field
         assert result["result"]["event_id"] == "evt_123"
-        assert result["result"]["type"] == "event"  # The envelope wrapper type, not the event type
+        assert result["result"]["envelope"] == "event"  # transport-framing marker
+        assert result["result"]["type"] == "revise"  # the actual domain event type
         assert result["result"]["payload"]["note"] == "Make it brighter"
         assert result["result"]["artifact_id"] == "art_789"
 
