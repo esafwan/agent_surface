@@ -119,7 +119,17 @@ def init_db(db_path: Union[str, Path, sqlite3.Connection]) -> sqlite3.Connection
     if isinstance(db_path, sqlite3.Connection):
         conn = db_path
     else:
-        conn = sqlite3.connect(str(db_path))
+        # check_same_thread=False: a Store's connection is used from a single
+        # logical caller, but that caller isn't always literally one OS
+        # thread -- Gradio (via Starlette) dispatches each synchronous board
+        # callback to its own worker thread, so a Store created once when the
+        # board thread launches would otherwise crash the moment a later
+        # callback runs on a different thread ("SQLite objects created in a
+        # thread can only be used in that same thread"). Store.__init__
+        # pairs this with an internal lock (see store.py) to serialize actual
+        # access across threads, since disabling the same-thread check alone
+        # does not make concurrent use of one connection safe.
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
 
     conn.row_factory = sqlite3.Row
     conn.executescript(INIT_SQL)

@@ -1,5 +1,7 @@
+import functools
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,8 +14,49 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _synchronized(cls):
+    """Class decorator: wrap every public (non-underscore) method so it
+    acquires the instance's lock for its whole duration.
+
+    Why this exists: a Store's single sqlite3.Connection is created once
+    (e.g. by cli.py's `_launch_board`) and then reused across every Gradio
+    board callback. Gradio/Starlette dispatches each synchronous callback to
+    a threadpool worker thread, so the SAME Connection object is used from
+    MANY different OS threads over its lifetime. schema.py's init_db()
+    already passes check_same_thread=False so that cross-thread reuse (one
+    thread at a time) doesn't raise sqlite3.ProgrammingError -- but per the
+    sqlite3 docs, check_same_thread=False only disables that ownership
+    check; it does NOT make one Connection object safe for two threads to
+    call into it AT THE SAME TIME. A threadpool-backed web server can
+    genuinely have two callbacks mid-execution in overlapping windows (e.g.
+    two artifact-card buttons clicked in quick succession, or Refresh racing
+    a Revise submission), so this lock provides the actual mutual exclusion
+    sqlite3 does not.
+
+    An RLock (not a plain Lock) is required because several public methods
+    call other public methods on `self` internally (create_artifact ->
+    get_artifact, put_version -> get_artifact/select_version, select_version
+    -> get_artifact/get_version, add_dependency -> get_artifact, finish_job
+    -> get_job/update_job_status). A plain Lock would deadlock the very
+    first time one of those nested calls re-entered on the same thread.
+    """
+    for name, value in list(vars(cls).items()):
+        if name.startswith("_") or not callable(value):
+            continue
+
+        @functools.wraps(value)
+        def wrapper(self, *args, _fn=value, **kwargs):
+            with self._lock:
+                return _fn(self, *args, **kwargs)
+
+        setattr(cls, name, wrapper)
+    return cls
+
+
+@_synchronized
 class Store:
     def __init__(self, db_path: Union[str, Path, sqlite3.Connection] = ":memory:"):
+        self._lock = threading.RLock()
         if isinstance(db_path, sqlite3.Connection):
             self.conn = db_path
             self.conn.row_factory = sqlite3.Row

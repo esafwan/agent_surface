@@ -1,3 +1,7 @@
+import sqlite3
+import threading
+from typing import Any, Dict, List
+
 import pytest
 from surface.store import Store
 
@@ -275,3 +279,92 @@ def test_job_lifecycle_and_cancellation():
         job2["id"], result={"video_url": "media/vid2.mp4"}
     )
     assert late_finish["status"] == "cancelled"
+
+
+def test_store_method_callable_from_a_different_real_thread(tmp_path):
+    """Regression test for: 'SQLite objects created in a thread can only be
+    used in that same thread.'
+
+    This is the exact failure mode from the live Gradio board crash: a
+    Store's connection is created on one OS thread (here, the main test
+    thread, mirroring how cli.py's `_launch_board` creates the board's Store
+    before spawning the daemon board thread) and then a Store method is
+    invoked from a genuinely different `threading.Thread` (mirroring a
+    Gradio/Starlette threadpool callback). Before schema.py's
+    check_same_thread=False fix, this raised sqlite3.ProgrammingError.
+
+    Uses a real file-backed db (not ":memory:") so this is as close as
+    possible to the real `.surface-board/state.sqlite3` usage pattern.
+    """
+    db_path = tmp_path / "state.sqlite3"
+    store = Store(str(db_path))
+    store.create_artifact(id="art_thread", stage="script", title="Thread Test")
+
+    result: Dict[str, Any] = {}
+
+    def _call_from_other_thread():
+        try:
+            result["artifact"] = store.get_artifact("art_thread")
+            result["listed"] = store.list_artifacts()
+        except Exception as e:  # pragma: no cover - only hit on regression
+            result["error"] = e
+
+    t = threading.Thread(target=_call_from_other_thread)
+    t.start()
+    t.join(timeout=10)
+
+    assert "error" not in result, f"cross-thread Store call raised: {result.get('error')!r}"
+    assert result["artifact"] is not None
+    assert result["artifact"]["id"] == "art_thread"
+    assert len(result["listed"]) == 1
+
+
+def test_store_concurrent_access_from_two_threads_is_safe(tmp_path):
+    """Prove actual simultaneous (not just sequential-different-thread)
+    access to one Store is safe.
+
+    Two threads hammer the SAME Store instance at the same time for a
+    bounded number of iterations: one thread creates artifacts, the other
+    repeatedly lists them. This mirrors the real `surface serve` board
+    usage pattern where Gradio's threadpool can genuinely have two
+    callbacks (e.g. two button clicks, or Refresh racing a Revise submit)
+    executing in overlapping time windows against one shared Store/
+    connection. Asserts: no exception from either thread, and the final
+    artifact count exactly matches the number of successful creates (i.e.
+    no lost/corrupted writes from interleaved access).
+    """
+    db_path = tmp_path / "state.sqlite3"
+    store = Store(str(db_path))
+
+    n_creates = 200
+    errors: List[Exception] = []
+    created_ids: List[str] = []
+
+    def _writer():
+        for i in range(n_creates):
+            try:
+                aid = f"art_concurrent_{i}"
+                store.create_artifact(id=aid, stage="script", title=f"Title {i}")
+                created_ids.append(aid)
+            except Exception as e:  # pragma: no cover - only hit on regression
+                errors.append(e)
+
+    def _reader():
+        for _ in range(n_creates):
+            try:
+                store.list_artifacts()
+            except Exception as e:  # pragma: no cover - only hit on regression
+                errors.append(e)
+
+    writer_thread = threading.Thread(target=_writer)
+    reader_thread = threading.Thread(target=_reader)
+    writer_thread.start()
+    reader_thread.start()
+    writer_thread.join(timeout=30)
+    reader_thread.join(timeout=30)
+
+    assert not errors, f"concurrent Store access raised: {errors!r}"
+    assert len(created_ids) == n_creates
+    final = store.list_artifacts()
+    assert len(final) == n_creates
+    assert {a["id"] for a in final} == set(created_ids)
