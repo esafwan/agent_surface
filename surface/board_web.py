@@ -206,6 +206,7 @@ def build_state_payload(
     for group in display.stages:
         stage_obj = stage_config.get_stage(group.stage_id)
         form_schema = getattr(stage_obj, "form_schema", None)
+        board_view = getattr(stage_obj, "board_view", None)
         stages.append(
             {
                 "stage_id": group.stage_id,
@@ -217,6 +218,7 @@ def build_state_payload(
                 "queued_count": sum(
                     a.active_event_count for a in group.artifacts
                 ),
+                "board_view": board_view,
                 "artifacts": [
                     _artifact_payload(card, form_schema, now)
                     for card in group.artifacts

@@ -572,70 +572,128 @@ function actionRow(card) {
   return any ? row : null;
 }
 
-function buildCard(card) {
+function buildCard(card, minimal = false) {
   const box = el("article", "card" + (card.status === "approved" ? " is-approved" : "") + (card.busy ? " is-busy" : ""));
 
   const head = el("div", "card-head");
   head.appendChild(el("h2", "card-title", card.title));
   head.appendChild(el("span", "chip-status st-" + card.status, card.status));
   box.appendChild(head);
-  box.appendChild(metaLine(card));
 
-  const banner = queuedBanner(card);
-  if (banner) box.appendChild(banner);
+  if (!minimal) {
+    box.appendChild(metaLine(card));
 
-  if (card.content_kind === "form") {
-    box.appendChild(formFields(card));
+    const banner = queuedBanner(card);
+    if (banner) box.appendChild(banner);
+
+    if (card.content_kind === "form") {
+      box.appendChild(formFields(card));
+    } else {
+      box.appendChild(contentBlock(card));
+    }
+
+    const prompt = promptFold(card);
+    if (prompt) box.appendChild(prompt);
+    const history = historyFold(card);
+    if (history) box.appendChild(history);
+
+    const controls = el("div", "controls");
+    let hasControls = false;
+
+    if (card.allowed_actions.indexOf("edit") >= 0 && card.content_kind !== "form") {
+      controls.appendChild(composer(card, "edit", {
+        label: "Replace content",
+        placeholder: "New content for this artifact…",
+        button: "Update",
+        action: "edit",
+        fieldName: "content",
+        multiline: true,
+      }));
+      hasControls = true;
+    }
+    if (card.allowed_actions.indexOf("revise") >= 0) {
+      controls.appendChild(composer(card, "revise", {
+        label: "Ask for a revision",
+        placeholder: "What should change?",
+        button: "Revise",
+        action: "revise",
+        fieldName: "note",
+      }));
+      hasControls = true;
+    }
+    if (card.allowed_actions.indexOf("message") >= 0) {
+      // Bound to THIS artifact. The old board's footer box posted
+      // artifact_id: null, which reached nothing in particular.
+      controls.appendChild(composer(card, "message", {
+        label: "Message the worker about this artifact",
+        placeholder: "Note for the worker…",
+        button: "Send",
+        action: "message",
+        fieldName: "text",
+      }));
+      hasControls = true;
+    }
+    const actions = actionRow(card);
+    if (actions) { controls.appendChild(actions); hasControls = true; }
+    if (hasControls) box.appendChild(controls);
   } else {
-    box.appendChild(contentBlock(card));
-  }
+    // Minimal card for column view: only show metadata and actions for "review" status
+    const meta = el("p", "card-meta");
+    if (card.updated_age) meta.appendChild(el("span", null, `updated ${card.updated_age} ago`));
+    box.appendChild(meta);
 
-  const prompt = promptFold(card);
-  if (prompt) box.appendChild(prompt);
-  const history = historyFold(card);
-  if (history) box.appendChild(history);
+    const banner = queuedBanner(card);
+    if (banner) box.appendChild(banner);
 
-  const controls = el("div", "controls");
-  let hasControls = false;
-
-  if (card.allowed_actions.indexOf("edit") >= 0 && card.content_kind !== "form") {
-    controls.appendChild(composer(card, "edit", {
-      label: "Replace content",
-      placeholder: "New content for this artifact…",
-      button: "Update",
-      action: "edit",
-      fieldName: "content",
-      multiline: true,
-    }));
-    hasControls = true;
+    // Only show approve/reopen buttons for tasks
+    if (card.allowed_actions.indexOf("approve") >= 0 || card.allowed_actions.indexOf("reopen") >= 0) {
+      const controls = el("div", "controls");
+      const actions = actionRow(card);
+      if (actions) controls.appendChild(actions);
+      if (controls.children.length > 0) box.appendChild(controls);
+    }
   }
-  if (card.allowed_actions.indexOf("revise") >= 0) {
-    controls.appendChild(composer(card, "revise", {
-      label: "Ask for a revision",
-      placeholder: "What should change?",
-      button: "Revise",
-      action: "revise",
-      fieldName: "note",
-    }));
-    hasControls = true;
-  }
-  if (card.allowed_actions.indexOf("message") >= 0) {
-    // Bound to THIS artifact. The old board's footer box posted
-    // artifact_id: null, which reached nothing in particular.
-    controls.appendChild(composer(card, "message", {
-      label: "Message the worker about this artifact",
-      placeholder: "Note for the worker…",
-      button: "Send",
-      action: "message",
-      fieldName: "text",
-    }));
-    hasControls = true;
-  }
-  const actions = actionRow(card);
-  if (actions) { controls.appendChild(actions); hasControls = true; }
-  if (hasControls) box.appendChild(controls);
 
   return box;
+}
+
+// Build column layout for column view
+function buildColumnView(stage) {
+  const container = el("div", "columns-container");
+
+  // Status to column label mapping
+  const statusColumns = {
+    draft: "Planned",
+    generating: "In Progress",
+    review: "Needs Approval",
+    approved: "Done",
+    failed: "Failed",
+    cancelled: "Cancelled"
+  };
+
+  // Create columns for each status
+  const columns = {};
+  Object.entries(statusColumns).forEach(([status, label]) => {
+    const col = el("div", "column");
+    col.dataset.status = status;
+    const header = el("div", "column-header");
+    header.appendChild(el("h3", "column-title", label));
+    const count = stage.artifacts.filter(a => a.status === status).length;
+    header.appendChild(el("span", "column-count", String(count)));
+    col.appendChild(header);
+    columns[status] = col;
+    container.appendChild(col);
+  });
+
+  // Place cards into columns
+  stage.artifacts.forEach((card) => {
+    const status = card.status || "draft";
+    if (columns[status]) {
+      columns[status].appendChild(buildCard(card, true));
+    }
+  });
+
+  return container;
 }
 
 // --- top level -------------------------------------------------------------
@@ -695,7 +753,12 @@ function render(next, force) {
   if (!stage || !stage.artifacts.length) {
     cards.appendChild(el("p", "empty-stage", "No artifacts in this stage yet."));
   } else {
-    stage.artifacts.forEach((card) => cards.appendChild(buildCard(card)));
+    // Check if this stage uses column view
+    if (stage.board_view === "columns") {
+      cards.appendChild(buildColumnView(stage));
+    } else {
+      stage.artifacts.forEach((card) => cards.appendChild(buildCard(card)));
+    }
   }
 
   paintInflight();
