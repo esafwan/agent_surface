@@ -178,6 +178,47 @@ function renderDiff(container, diffData) {
   container.appendChild(diffBox);
 }
 
+// --- dependency graph helpers ------------------------------------------------
+
+// Fetch the Mermaid text for an artifact's immediate upstream/downstream
+// neighborhood. Returns null on any failure so the caller can show a plain
+// error message instead of a broken diagram.
+async function fetchGraph(artifactId) {
+  try {
+    const res = await fetch(`/api/graph/${artifactId}`);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      console.error('Graph fetch failed:', error.error || res.statusText);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.error('Graph fetch error:', err);
+    return null;
+  }
+}
+
+// Render a dependency graph into a container, reusing T1's Mermaid render
+// path so there is exactly one place that talks to mermaid.js.
+async function renderGraph(container, graphData) {
+  container.innerHTML = "";
+  if (!graphData || !graphData.mermaid) {
+    container.textContent = "Failed to load dependency graph";
+    return;
+  }
+  const diagramContainer = el("div", "mermaid-diagram");
+  container.appendChild(diagramContainer);
+  const success = await renderMermaidDiagram(diagramContainer, graphData.mermaid);
+  if (!success) {
+    diagramContainer.className = "mermaid-diagram-error";
+    diagramContainer.textContent = "```mermaid\n" + graphData.mermaid + "\n```";
+    return;
+  }
+  if (!graphData.has_dependencies) {
+    container.appendChild(el("p", "hint", "No dependencies (no upstream or downstream artifacts)."));
+  }
+}
+
 // --- in-flight -------------------------------------------------------------
 
 function paintInflight() {
@@ -696,6 +737,31 @@ function buildCard(card, minimal = false) {
       diffContainer.style.display = "none";
       box.appendChild(diffContainer);
     }
+
+    // Dependencies: renders the artifact's immediate upstream/downstream
+    // neighborhood as a Mermaid graph, through T1's shared render path.
+    const depsRow = el("div", "row");
+    const depsBtn = el("button", null, "Dependencies");
+    const depsContainer = el("div");
+    depsContainer.id = "graph-container-" + card.artifact_id;
+    depsContainer.style.display = "none";
+    depsBtn.onclick = async () => {
+      if (depsContainer.style.display === "none") {
+        depsContainer.style.display = "block";
+        depsContainer.innerHTML = "";
+        const loadingMsg = el("p");
+        loadingMsg.style.color = "var(--fg-muted)";
+        loadingMsg.textContent = "Loading dependency graph...";
+        depsContainer.appendChild(loadingMsg);
+        const graphData = await fetchGraph(card.artifact_id);
+        await renderGraph(depsContainer, graphData);
+      } else {
+        depsContainer.style.display = "none";
+      }
+    };
+    depsRow.appendChild(depsBtn);
+    box.appendChild(depsRow);
+    box.appendChild(depsContainer);
 
     const prompt = promptFold(card);
     if (prompt) box.appendChild(prompt);

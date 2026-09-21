@@ -242,6 +242,100 @@ def build_state_payload(
     }
 
 
+STATUS_STYLE = {
+    "approved": "fill:#2e7d32,color:#fff,stroke:#1b5e20",
+    "stale": "fill:#e69500,color:#fff,stroke:#a86700",
+    "failed": "fill:#c62828,color:#fff,stroke:#7f0000",
+}
+CENTER_STYLE = "fill:#1565c0,color:#fff,stroke:#0d47a1,stroke-width:3px"
+
+
+def _mermaid_node_id(artifact_id: str) -> str:
+    """A Mermaid-safe node id derived from an artifact id.
+
+    Mermaid node ids can't contain spaces or several punctuation characters
+    that legitimately show up in artifact ids, so this maps to a plain
+    alnum/underscore token while staying stable and unique per input.
+    """
+    return "n_" + "".join(c if c.isalnum() else "_" for c in artifact_id)
+
+
+def _mermaid_label(title: Optional[str], artifact_id: str, locked: bool) -> str:
+    label = title or artifact_id
+    if locked:
+        label = "\U0001F512 " + label
+    # Escape quotes so the label stays inside Mermaid's quoted node text.
+    label = label.replace('"', "'")
+    return label
+
+
+def build_dependency_graph_mermaid(store: Store, artifact_id: str) -> Dict[str, Any]:
+    """Build Mermaid `graph TD` text for an artifact's immediate DAG neighborhood.
+
+    Reuses `Store.get_graph`, which already returns only direct upstream and
+    downstream neighbors (no recursive/full-project walk). Node status is
+    encoded as fill color (approved=green, stale=amber, failed=red); a locked
+    artifact gets a padlock prefix on its label; the center artifact gets its
+    own distinct style so it reads clearly against its neighbors.
+
+    Returns {"artifact_id", "mermaid", "has_dependencies"}. When the artifact
+    has no upstream or downstream neighbors, `mermaid` still renders a single
+    labeled node rather than an empty/invalid diagram, and
+    `has_dependencies` is False so the client can show a "no dependencies"
+    hint alongside it.
+    """
+    center = store.get_artifact(artifact_id)
+    center_title = center.get("title") if center else artifact_id
+    center_locked = bool(center.get("locked")) if center else False
+
+    graph = store.get_graph(artifact_id)
+    upstreams = graph.get("upstreams", [])
+    downstreams = graph.get("downstreams", [])
+    has_dependencies = bool(upstreams) or bool(downstreams)
+
+    center_node = _mermaid_node_id(artifact_id)
+    lines = ["graph TD"]
+    lines.append(f'    {center_node}["{_mermaid_label(center_title, artifact_id, center_locked)}"]')
+    style_lines = [f"    style {center_node} {CENTER_STYLE}"]
+
+    seen_ids = {artifact_id}
+    for up in upstreams:
+        up_id = up.get("upstream_artifact_id")
+        if up_id is None or up_id in seen_ids:
+            continue
+        seen_ids.add(up_id)
+        neighbor = store.get_artifact(up_id)
+        title = neighbor.get("title") if neighbor else up_id
+        status = neighbor.get("status") if neighbor else None
+        locked = bool(neighbor.get("locked")) if neighbor else False
+        node = _mermaid_node_id(up_id)
+        lines.append(f'    {node}["{_mermaid_label(title, up_id, locked)}"] --> {center_node}')
+        if status in STATUS_STYLE:
+            style_lines.append(f"    style {node} {STATUS_STYLE[status]}")
+
+    for down in downstreams:
+        down_id = down.get("downstream_artifact_id")
+        if down_id is None or down_id in seen_ids:
+            continue
+        seen_ids.add(down_id)
+        neighbor = store.get_artifact(down_id)
+        title = neighbor.get("title") if neighbor else down_id
+        status = neighbor.get("status") if neighbor else None
+        locked = bool(neighbor.get("locked")) if neighbor else False
+        node = _mermaid_node_id(down_id)
+        lines.append(f'    {center_node} --> {node}["{_mermaid_label(title, down_id, locked)}"]')
+        if status in STATUS_STYLE:
+            style_lines.append(f"    style {node} {STATUS_STYLE[status]}")
+
+    lines.extend(style_lines)
+
+    return {
+        "artifact_id": artifact_id,
+        "mermaid": "\n".join(lines),
+        "has_dependencies": has_dependencies,
+    }
+
+
 # =============================================================================
 # Action dispatch (thin adapter over ActionHandler -- no logic of its own)
 # =============================================================================
@@ -522,6 +616,17 @@ def create_app(
             "old_label": old_label,
             "new_label": new_label
         })
+
+    @app.get("/api/graph/{artifact_id}")
+    def graph(artifact_id: str, request: Request):
+        """Mermaid text for an artifact's immediate upstream/downstream neighbors."""
+        if not _authed(request):
+            return _unauthorized()
+
+        if not store.get_artifact(artifact_id):
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        return JSONResponse(build_dependency_graph_mermaid(store, artifact_id))
 
     if STATIC_DIR.is_dir():
         @app.get("/static/{path:path}")
