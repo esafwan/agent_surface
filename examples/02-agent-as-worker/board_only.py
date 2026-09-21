@@ -22,10 +22,13 @@ another terminal to see the event waiting, and write whatever you want as
 the new version.
 
 Run:
-    python examples/02-agent-as-worker/board_only.py
+    python examples/02-agent-as-worker/board_only.py             # no auth
+    python examples/02-agent-as-worker/board_only.py --pin 1234   # optional gate
 """
 
+import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -34,9 +37,24 @@ from surface.stages.config import StageConfig, load_preset
 from surface.store import Store
 
 HERE = Path(__file__).resolve().parent
-DB = str(HERE / "state.sqlite3")
-PORT = 7871
-TOKEN = "agent-as-worker-demo"
+
+parser = argparse.ArgumentParser(description="Board without the supervisor")
+parser.add_argument("--db", default=str(HERE / "state.sqlite3"))
+parser.add_argument("--host", default="127.0.0.1")
+parser.add_argument("--port", type=int, default=7871)
+parser.add_argument("--pin", help="Optional 4- or 6-digit gate (default: no auth). "
+                    "Gradio's auth needs a username too, so this pairs it "
+                    "with the fixed user 'surface'.")
+args = parser.parse_args()
+
+if args.pin is not None and not re.fullmatch(r"\d{4}|\d{6}", args.pin):
+    parser.error("--pin must be 4 or 6 digits")
+
+loopback = args.host in ("127.0.0.1", "localhost", "::1")
+if not loopback and args.pin is None:
+    parser.error(f"refusing to bind {args.host} without --pin")
+
+DB = args.db
 
 
 def ensure_seeded() -> Store:
@@ -74,9 +92,10 @@ row = store.conn.execute(
 stage_config = StageConfig(json.loads(row[0]))
 
 blocks = build_board(store, stage_config)
-(HERE / "run").mkdir(parents=True, exist_ok=True)
+(Path(DB).resolve().parent / "run").mkdir(parents=True, exist_ok=True)
 
-print(f"  Board: http://127.0.0.1:{PORT}  (user: surface, password: {TOKEN})")
+print(f"  Board: http://{args.host}:{args.port}"
+      f"{f'  (user: surface, password: {args.pin})' if args.pin else '  (no auth)'}")
 print(f"  Claim events against: surface --db {DB} inbox next --wait 60")
 # Stdout is fully buffered once it isn't a tty (e.g. backgrounded with `&` or
 # redirected to a log file, as the README suggests). blocks.launch() below
@@ -85,10 +104,13 @@ print(f"  Claim events against: surface --db {DB} inbox next --wait 60")
 # though it's serving.
 sys.stdout.flush()
 
+# The PIN, when set, gates the browser, not the machine -- see the same
+# caveat in examples/04-live-surface/loop.py. This is a convenience lock
+# for a single-user localhost app, not an authentication system.
 blocks.launch(
-    server_name="127.0.0.1",
-    server_port=PORT,
-    auth=("surface", TOKEN),
+    server_name=args.host,
+    server_port=args.port,
+    auth=("surface", args.pin) if args.pin else None,
     quiet=False,
     show_api=False,
 )

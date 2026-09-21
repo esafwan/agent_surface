@@ -96,6 +96,17 @@ happen. Nothing writes new content. To put a real agent in the loop:
 sits `pending` indefinitely and the board shows nothing -- see the warning
 under Board UI Best Practices.
 
+**If you are option 2, do it as a sub-agent, not as yourself.** `inbox next
+--wait N` blocks for up to N seconds; looping it to keep a board alive
+blocks the calling agent's own turn for as long as the board needs a worker
+-- which, for a board someone is actually using, is indefinite. That leaves
+you unable to talk to the user, do other work, or respond to anything else
+while you sit in a poll loop. Spawn a sub-agent to own the claim/write/ack
+loop instead (see "Sub-Agent Ownership and Handoff" below) and stay free
+yourself. This matters most exactly when you'd want it least: a human
+testing the board's UX needs a worker listening for the whole session, which
+is the worst possible thing to block your main agent on.
+
 ---
 
 ## Using the Store: No Direct Database Access
@@ -509,7 +520,12 @@ conversation.
 
 ## Sub-Agent Ownership and Handoff
 
-A board may be owned by a sub-agent directly (no parent mediation per UI action).
+**Use this whenever holding a board open would otherwise block your own
+turn** -- being the worker (see above), running the supervisor loop, or
+polling jobs are all long-lived or indefinite. A board may be owned by a
+sub-agent directly (no parent mediation per UI action), so the parent stays
+free to keep talking to the user or doing other work while the sub-agent
+sits in the claim/write/ack loop.
 
 ```python
 # Parent agent initializes and starts supervisor:
