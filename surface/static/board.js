@@ -46,6 +46,57 @@ function rememberInput(input, artifactId, slot) {
   return input;
 }
 
+// --- mermaid helpers -------------------------------------------------------
+
+// Extract mermaid fenced blocks from text. Returns an array of objects with
+// { type: 'text' | 'mermaid', content: string }
+function extractMermaidBlocks(text) {
+  const blocks = [];
+  const mermaidRegex = /```mermaid\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = mermaidRegex.exec(text)) !== null) {
+    // Add text before this mermaid block
+    if (match.index > lastIndex) {
+      blocks.push({ type: 'text', content: text.substring(lastIndex, match.index) });
+    }
+    // Add the mermaid block
+    blocks.push({ type: 'mermaid', content: match[1].trim() });
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Add any remaining text after the last mermaid block
+  if (lastIndex < text.length) {
+    blocks.push({ type: 'text', content: text.substring(lastIndex) });
+  }
+
+  // If no mermaid blocks were found, return the entire text as a single text block
+  if (blocks.length === 0) {
+    blocks.push({ type: 'text', content: text });
+  }
+
+  return blocks;
+}
+
+// Render a mermaid diagram into a container element. Returns true on success,
+// false on failure (in which case the caller should render the raw text instead).
+async function renderMermaidDiagram(container, diagramText) {
+  try {
+    if (!window.mermaid) {
+      console.warn('mermaid not loaded');
+      return false;
+    }
+    // Use mermaid's render function to generate SVG
+    const { svg } = await window.mermaid.render('mermaid-' + Date.now(), diagramText);
+    container.innerHTML = svg;
+    return true;
+  } catch (err) {
+    console.warn('Failed to render mermaid diagram:', err);
+    return false;
+  }
+}
+
 // --- in-flight -------------------------------------------------------------
 
 function paintInflight() {
@@ -220,7 +271,43 @@ function contentBlock(card) {
       if (card.selected_version && card.selected_version.content_type === "application/json") {
         box.classList.add("json");
       }
-      box.textContent = card.content_text;   // text node: newlines survive
+
+      // Check if content has mermaid blocks
+      const blocks = extractMermaidBlocks(card.content_text);
+      const hasMermaid = blocks.some(b => b.type === 'mermaid');
+
+      if (hasMermaid) {
+        // Build the content with mermaid diagrams
+        blocks.forEach((block, idx) => {
+          if (block.type === 'text') {
+            // Add text content as a text node
+            if (block.content) {
+              box.appendChild(document.createTextNode(block.content));
+            }
+          } else {
+            // Create a container for the mermaid diagram
+            const diagramContainer = el("div", "mermaid-diagram");
+            box.appendChild(diagramContainer);
+
+            // Render the diagram asynchronously
+            renderMermaidDiagram(diagramContainer, block.content).then(success => {
+              if (!success) {
+                // Fallback: show the raw fenced block as text
+                diagramContainer.className = "mermaid-diagram-error";
+                diagramContainer.textContent = "```mermaid\n" + block.content + "\n```";
+              }
+            }).catch(err => {
+              // Double fallback for any uncaught errors
+              diagramContainer.className = "mermaid-diagram-error";
+              diagramContainer.textContent = "```mermaid\n" + block.content + "\n```";
+              console.error("Mermaid rendering error:", err);
+            });
+          }
+        });
+      } else {
+        // No mermaid blocks, render as plain text
+        box.textContent = card.content_text;   // text node: newlines survive
+      }
     }
     return box;
   }
