@@ -114,10 +114,21 @@ JSON results go to stdout; diagnostics go to stderr.
 
 ## Stage presets
 
-Ships with a `movie` pipeline preset (`surface/stages/movie.json`): script → shots →
-keyframes → clips → assembly, with per-stage allowed actions, dependencies, and
-generation defaults. Custom stage configs are plain JSON validated against the same
-schema (see `surface/stages/config.py`).
+Ships with several built-in presets:
+
+- **`movie`** (`surface/stages/movie.json`): a linear pipeline (script → shots → keyframes → clips → assembly) for video/media production, with per-stage allowed actions, dependencies, and generation defaults.
+- **`task_board`** (`surface/stages/task_board.json`): a read-only, status-column board for agent-decomposed multi-step work. Tasks flow from "Planned" → "In Progress" → "Needs Approval" → "Done", with user approval gates and worker-driven task creation/updates.
+- Additional presets (questionnaire, plan_review, document_review, diff_review, generic_media_pipeline) provide templates for common workflows.
+
+Custom stage configs are plain JSON validated against the same schema (see `surface/stages/config.py`).
+
+## Web Board Rendering Features
+
+The default web renderer (`--renderer web`) includes:
+
+- **Mermaid diagram support**: any text/markdown artifact with fenced `` ```mermaid ``` `` blocks renders them as diagrams automatically, useful for specs and architecture diagrams.
+- **Version diff**: artifacts with 2+ versions show a "Compare to previous version" control, with server-side line-by-line diffs computed fresh on each load.
+- **Dependency graph view**: a "Dependencies" button on any card displays its upstream/downstream neighbors as a status-colored Mermaid graph, updating live without restart.
 
 ## Architecture at a glance
 

@@ -513,6 +513,215 @@ And some text after.
     assert "And some text after" in card["content_text"]
 
 
+# =============================================================================
+# Task Board Integration Tests
+# =============================================================================
+
+
+@pytest.fixture
+def task_board_store():
+    """A store with multiple task artifacts in different statuses."""
+    store = Store(":memory:")
+
+    # Create task artifacts with various statuses
+    # Note: stage must be "tasks" (matching task_board.json stage id), not "task"
+    tasks = [
+        ("task_001", "tasks", "Planned Task 1", "draft"),
+        ("task_002", "tasks", "Planned Task 2", "draft"),
+        ("task_003", "tasks", "Task In Progress", "generating"),
+        ("task_004", "tasks", "Task Needs Review", "review"),
+        ("task_005", "tasks", "Approved Task", "approved"),
+        ("task_006", "tasks", "Failed Task", "failed"),
+    ]
+
+    for task_id, stage, title, status in tasks:
+        store.create_artifact(id=task_id, stage=stage, title=title, status=status)
+        store.put_version(
+            task_id,
+            content=f"Task content for {title}",
+            content_type="text/plain",
+            created_by="worker",
+            select=True,
+        )
+
+    return store
+
+
+@pytest.fixture
+def task_board_config():
+    return load_preset("task_board")
+
+
+@pytest.fixture
+def task_board_client(task_board_store, task_board_config):
+    from surface.board_web import create_app
+
+    return TestClient(create_app(task_board_store, task_board_config))
+
+
+def test_task_board_preset_returns_columns_board_view(task_board_client):
+    """Verify the task_board preset includes board_view='columns' in state."""
+    body = task_board_client.get("/api/state").json()
+
+    assert len(body["stages"]) == 1
+    stage = body["stages"][0]
+    assert stage["stage_id"] == "tasks"
+    assert stage["board_view"] == "columns"
+
+
+def test_task_board_groups_artifacts_by_status(task_board_store, task_board_config):
+    """Verify that artifacts are properly represented with their statuses."""
+    builder = DisplayModelBuilder(task_board_store, task_board_config)
+    payload = build_state_payload(builder.build_board_display(), task_board_config)
+
+    stage = payload["stages"][0]
+    artifacts = stage["artifacts"]
+
+    # All 6 artifacts should be present
+    assert len(artifacts) == 6
+
+    # Verify status distribution
+    statuses = {a["status"] for a in artifacts}
+    assert statuses == {"draft", "generating", "review", "approved", "failed"}
+
+    # Verify counts
+    draft_count = sum(1 for a in artifacts if a["status"] == "draft")
+    assert draft_count == 2
+
+    review_count = sum(1 for a in artifacts if a["status"] == "review")
+    assert review_count == 1
+
+    approved_count = sum(1 for a in artifacts if a["status"] == "approved")
+    assert approved_count == 1
+
+
+def test_task_board_only_allows_approve_and_reopen_actions(task_board_store, task_board_config):
+    """Verify the task_board preset only allows approve and reopen actions."""
+    stage = task_board_config.get_stage("tasks")
+    assert stage.allowed_actions == ["approve", "reopen"]
+    # Ensure other actions are NOT present
+    assert "edit" not in stage.allowed_actions
+    assert "revise" not in stage.allowed_actions
+    assert "message" not in stage.allowed_actions
+
+
+def test_task_board_approve_action_updates_store_and_returns_fresh_state(
+    task_board_store, task_board_client
+):
+    """Integration test: approve a task via HTTP, verify store and state reflect it."""
+    # Initial state: task_004 should be in "review" status
+    initial = task_board_client.get("/api/state").json()
+    task_004_initial = next(
+        a for a in initial["stages"][0]["artifacts"] if a["artifact_id"] == "task_004"
+    )
+    assert task_004_initial["status"] == "review"
+
+    # Post an approve action
+    res = task_board_client.post(
+        "/api/action",
+        json={"action": "approve", "artifact_id": "task_004"}
+    )
+    body = res.json()
+
+    # Verify the action succeeded
+    assert body["result"]["ok"] is True
+
+    # Verify the store was updated
+    artifact = task_board_store.get_artifact("task_004")
+    assert artifact["status"] == "approved"
+
+    # Verify the returned state shows the updated status
+    state = body["state"]
+    task_004_updated = next(
+        a for a in state["stages"][0]["artifacts"] if a["artifact_id"] == "task_004"
+    )
+    assert task_004_updated["status"] == "approved"
+
+    # Verify the new state payload reflects the change
+    fresh = task_board_client.get("/api/state").json()
+    task_004_fresh = next(
+        a for a in fresh["stages"][0]["artifacts"] if a["artifact_id"] == "task_004"
+    )
+    assert task_004_fresh["status"] == "approved"
+
+
+def test_task_board_reopen_action(task_board_store, task_board_client):
+    """Integration test: reopen an approved task, verify event is enqueued."""
+    # task_005 starts as "approved"
+    artifact_before = task_board_store.get_artifact("task_005")
+    assert artifact_before["status"] == "approved"
+
+    # Post a reopen action
+    res = task_board_client.post(
+        "/api/action",
+        json={"action": "reopen", "artifact_id": "task_005"}
+    )
+    body = res.json()
+
+    # Verify the action succeeded and an event was enqueued
+    assert body["result"]["ok"] is True
+
+    # Reopen enqueues an event for the worker to process, so the status
+    # doesn't change immediately. Verify the event is pending in the store.
+    events = task_board_store.list_active_events("task_005")
+    assert len(events) > 0
+    assert any(e["type"] == "reopen" for e in events)
+
+    # The returned state should show the task is busy (pending event)
+    state = body["state"]
+    task_005_state = next(
+        a for a in state["stages"][0]["artifacts"] if a["artifact_id"] == "task_005"
+    )
+    assert task_005_state["busy"] is True
+
+
+def test_task_board_approve_button_appears_on_all_cards(task_board_client):
+    """Verify that approve and reopen action controls exist in the state for all tasks.
+
+    This is testing a known characteristic: action buttons are gated purely by
+    stage config allowed_actions, NOT by artifact status. So Approve/Reopen
+    appear on every task card regardless of its current status.
+
+    A prior version of this test asserted `"approve" in stage["artifact_type"]`
+    (a substring check against a string like "task", which is always False)
+    `or stage is not None` (always True, since `stage` was already dereferenced
+    above -- this OR made the whole assertion pass unconditionally) and
+    `non_review is not None` after a `next()` call that would have raised
+    StopIteration rather than returned None on an empty match. Neither
+    assertion could ever fail regardless of real behavior. Fixed to check
+    what the test's name and docstring actually claim.
+    """
+    state = task_board_client.get("/api/state").json()
+    stage = state["stages"][0]
+    artifacts = stage["artifacts"]
+
+    statuses_present = {a["status"] for a in artifacts}
+    assert len(statuses_present) > 1, (
+        "fixture must include multiple distinct statuses for this test to mean anything"
+    )
+
+    # Every artifact, regardless of its own status, must carry "approve" and
+    # "reopen" in its OWN allowed_actions -- this is the actual claim being
+    # tested, not the stage's artifact_type string or a tautology.
+    for artifact in artifacts:
+        assert "approve" in artifact["allowed_actions"], (
+            f"{artifact['artifact_id']} (status={artifact['status']}) "
+            f"missing 'approve' in allowed_actions"
+        )
+        assert "reopen" in artifact["allowed_actions"], (
+            f"{artifact['artifact_id']} (status={artifact['status']}) "
+            f"missing 'reopen' in allowed_actions"
+        )
+        # And confirm the read-only premise: no edit/revise/message leaks in.
+        assert "edit" not in artifact["allowed_actions"]
+        assert "revise" not in artifact["allowed_actions"]
+        assert "message" not in artifact["allowed_actions"]
+
+    non_review = next(a for a in artifacts if a["status"] != "review")
+    assert "approve" in non_review["allowed_actions"]
+    assert "reopen" in non_review["allowed_actions"]
+
+
 def test_plain_text_without_mermaid_is_passed_through():
     """Verify that plain text content without mermaid blocks works correctly."""
     config = load_preset("poem")
