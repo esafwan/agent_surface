@@ -407,6 +407,65 @@ input:disabled, textarea:disabled, select:disabled {
 label.check { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-body); }
 label.check input { width: auto; }
 
+/* --- diff display ----------------------------------------------------- */
+.diff-container {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s4);
+  margin: var(--s4) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.diff-line {
+  display: block;
+}
+
+.diff-line.header {
+  color: var(--fg-muted);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.diff-line.added {
+  background-color: rgba(47, 143, 91, 0.15);
+  color: var(--ok);
+}
+
+.diff-line.removed {
+  background-color: rgba(194, 65, 59, 0.15);
+  color: var(--danger);
+}
+
+.diff-line.context {
+  color: var(--fg);
+}
+
+/* Dark mode diff adjustments */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .diff-line.added {
+    background-color: rgba(87, 182, 127, 0.2);
+  }
+
+  :root:not([data-theme="light"]) .diff-line.removed {
+    background-color: rgba(224, 113, 106, 0.2);
+  }
+}
+
+:root[data-theme="dark"] .diff-line.added {
+  background-color: rgba(87, 182, 127, 0.2);
+}
+
+:root[data-theme="dark"] .diff-line.removed {
+  background-color: rgba(224, 113, 106, 0.2);
+}
+
 /* --- column layout for task board ---------------------------------------- */
 .columns-container {
   display: grid;

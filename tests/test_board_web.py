@@ -539,3 +539,102 @@ No special formatting here."""
     assert card["title"] == "Plain Text"
     assert card["content_kind"] == "text"
     assert card["content_text"] == plain_content
+
+
+# =============================================================================
+# Diff endpoint
+# =============================================================================
+
+
+def test_diff_between_two_versions(client, poem_store):
+    v1 = poem_store.put_version(
+        "poem_001",
+        content="line one\nline two\n",
+        created_by="test",
+        select=True,
+    )
+    v2 = poem_store.put_version(
+        "poem_001",
+        content="line one\nline two modified\n",
+        created_by="test",
+        select=True,
+    )
+
+    res = client.get(
+        f"/api/diff/poem_001?from={v1['version_id']}&to={v2['version_id']}"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert "lines" in body
+    assert "old_label" in body
+    assert "new_label" in body
+    # The labels contain the version numbers
+    assert body["old_label"].startswith("v")
+    assert body["new_label"].startswith("v")
+    # Check that the diff contains the actual changes
+    diff_text = "\n".join(body["lines"])
+    assert "line two modified" in diff_text
+
+
+def test_diff_with_missing_query_params(client):
+    res = client.get("/api/diff/poem_001")
+    assert res.status_code == 400
+    assert "missing query parameters" in res.json()["error"]
+
+
+def test_diff_with_nonexistent_version(client):
+    res = client.get("/api/diff/poem_001?from=nonexistent&to=nonexistent")
+    assert res.status_code == 404
+    assert "not found" in res.json()["error"]
+
+
+def test_diff_with_versions_from_different_artifacts(poem_store, client):
+    # Create another artifact
+    poem_store.create_artifact(id="poem_002", stage="poem", title="Other Poem")
+    v1 = poem_store.put_version(
+        "poem_001",
+        content="content 1\n",
+        created_by="test",
+        select=True,
+    )
+    v2 = poem_store.put_version(
+        "poem_002",
+        content="content 2\n",
+        created_by="test",
+        select=True,
+    )
+
+    res = client.get(
+        f"/api/diff/poem_001?from={v1['version_id']}&to={v2['version_id']}"
+    )
+    assert res.status_code == 400
+    assert "do not match artifact" in res.json()["error"]
+
+
+def test_diff_only_works_with_text_content(poem_store, client):
+    config = load_preset("movie")
+    store = Store(":memory:")
+    store.create_artifact(id="kf_001", stage="keyframes", title="Keyframe")
+    v1 = store.put_version(
+        "kf_001",
+        content_type="image/png",
+        content_ref="frames/a.png",
+        created_by="test",
+        select=True,
+    )
+    v2 = store.put_version(
+        "kf_001",
+        content_type="image/png",
+        content_ref="frames/b.png",
+        created_by="test",
+        select=True,
+    )
+
+    from surface.board_web import create_app
+
+    test_client = TestClient(create_app(store, config))
+    res = test_client.get(
+        f"/api/diff/kf_001?from={v1['version_id']}&to={v2['version_id']}"
+    )
+    assert res.status_code == 400
+    assert "only supports text content" in res.json()["error"]

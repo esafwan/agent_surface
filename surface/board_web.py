@@ -63,6 +63,7 @@ from surface.board import (
     ArtifactDisplayCard,
     BoardDisplayModel,
     DisplayModelBuilder,
+    VersionDisplayRow,
     board_state_fingerprint,
     describe_select_version_conflict,
     field_label_for,
@@ -73,6 +74,7 @@ from surface.board import (
     render_version_content,
     schema_properties,
 )
+from surface.diff import diff_versions
 from surface.stages.config import StageConfig
 from surface.store import Store
 
@@ -417,6 +419,109 @@ def create_app(
             mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         )
         return FileResponse(path, media_type=media_type)
+
+    @app.get("/api/diff/{artifact_id}")
+    def diff(artifact_id: str, request: Request):
+        """Compute and return a unified diff between two versions of an artifact.
+
+        Query parameters:
+            from: version_id of the earlier version
+            to: version_id of the later version
+
+        Returns a JSON object with:
+            lines: list of unified diff lines
+            old_label: label for the old version
+            new_label: label for the new version
+            error: error message if something goes wrong
+        """
+        if not _authed(request):
+            return _unauthorized()
+
+        from_version_id = request.query_params.get("from")
+        to_version_id = request.query_params.get("to")
+
+        if not from_version_id or not to_version_id:
+            return JSONResponse(
+                {"error": "missing query parameters: from and to"},
+                status_code=400
+            )
+
+        # Fetch both versions
+        old_version = store.get_version(from_version_id)
+        new_version = store.get_version(to_version_id)
+
+        if not old_version:
+            return JSONResponse(
+                {"error": f"version not found: {from_version_id}"},
+                status_code=404
+            )
+        if not new_version:
+            return JSONResponse(
+                {"error": f"version not found: {to_version_id}"},
+                status_code=404
+            )
+
+        # Verify they belong to the same artifact
+        if old_version.get("artifact_id") != artifact_id or new_version.get("artifact_id") != artifact_id:
+            return JSONResponse(
+                {"error": "versions do not match artifact"},
+                status_code=400
+            )
+
+        # Convert dicts to VersionDisplayRow objects for render_version_content
+        old_version_row = VersionDisplayRow(
+            version_id=old_version.get("version_id", ""),
+            version_num=old_version.get("n", 0),
+            content_type=old_version.get("content_type"),
+            content=old_version.get("content"),
+            content_ref=old_version.get("content_ref"),
+            prompt=old_version.get("prompt"),
+            note=old_version.get("note"),
+            created_by=old_version.get("created_by", "worker"),
+            created_at=old_version.get("created_at", ""),
+        )
+        new_version_row = VersionDisplayRow(
+            version_id=new_version.get("version_id", ""),
+            version_num=new_version.get("n", 0),
+            content_type=new_version.get("content_type"),
+            content=new_version.get("content"),
+            content_ref=new_version.get("content_ref"),
+            prompt=new_version.get("prompt"),
+            note=new_version.get("note"),
+            created_by=new_version.get("created_by", "worker"),
+            created_at=new_version.get("created_at", ""),
+        )
+
+        # Extract content from both versions
+        old_kind, old_content = render_version_content(old_version_row)
+        new_kind, new_content = render_version_content(new_version_row)
+
+        # Only compute diff for text content
+        if old_kind != "text" or new_kind != "text":
+            return JSONResponse(
+                {"error": "diff only supports text content"},
+                status_code=400
+            )
+
+        old_content = old_content or ""
+        new_content = new_content or ""
+
+        # Compute the diff
+        old_label = f"v{old_version_row.version_num}"
+        new_label = f"v{new_version_row.version_num}"
+
+        diff_lines = diff_versions(
+            old_content,
+            new_content,
+            old_label=old_label,
+            new_label=new_label
+        )
+
+        return JSONResponse({
+            "lines": diff_lines,
+            "old_label": old_label,
+            "new_label": new_label
+        })
 
     if STATIC_DIR.is_dir():
         @app.get("/static/{path:path}")

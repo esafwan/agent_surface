@@ -125,6 +125,59 @@ async function renderMermaidDiagram(container, diagramText) {
   }
 }
 
+// --- diff helpers -----------------------------------------------------------
+
+// Fetch a diff between two versions and return the diff lines
+async function fetchDiff(artifactId, fromVersionId, toVersionId) {
+  try {
+    const res = await fetch(
+      `/api/diff/${artifactId}?from=${fromVersionId}&to=${toVersionId}`
+    );
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      console.error('Diff fetch failed:', error.error || res.statusText);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.error('Diff fetch error:', err);
+    return null;
+  }
+}
+
+// Render a diff into a container
+function renderDiff(container, diffData) {
+  if (!diffData || !diffData.lines || !Array.isArray(diffData.lines)) {
+    container.textContent = "No changes between versions";
+    return;
+  }
+
+  container.innerHTML = "";
+  const diffBox = el("div", "diff-container");
+
+  diffData.lines.forEach((line) => {
+    const lineEl = el("span", "diff-line");
+
+    // Classify the line
+    if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@")) {
+      lineEl.classList.add("header");
+    } else if (line.startsWith("+")) {
+      lineEl.classList.add("added");
+    } else if (line.startsWith("-")) {
+      lineEl.classList.add("removed");
+    } else {
+      lineEl.classList.add("context");
+    }
+
+    // Remove trailing newline for display (it's part of the line from difflib)
+    const displayLine = line.endsWith("\n") ? line.slice(0, -1) : line;
+    lineEl.textContent = displayLine;
+    diffBox.appendChild(lineEl);
+  });
+
+  container.appendChild(diffBox);
+}
+
 // --- in-flight -------------------------------------------------------------
 
 function paintInflight() {
@@ -402,7 +455,7 @@ function historyFold(card) {
   const body = el("div");
   const current = card.selected_version ? card.selected_version.version_id : "";
 
-  [...card.all_versions].reverse().forEach((v) => {
+  [...card.all_versions].reverse().forEach((v, idx) => {
     const row = el("div", "vrow" + (v.is_selected ? " current" : ""));
     const left = el("span", "vlabel");
     left.appendChild(el("b", null, "v" + v.version_num));
@@ -428,6 +481,52 @@ function historyFold(card) {
     }
     body.appendChild(row);
   });
+
+  // Add compare button if selected version exists and there's a previous version
+  if (card.selected_version && card.all_versions.length >= 2) {
+    const selectedIdx = card.all_versions.findIndex(v => v.is_selected);
+    if (selectedIdx > 0) {
+      const prevVersion = card.all_versions[selectedIdx - 1];
+      const compareRow = el("div", "vrow");
+      const compareBtn = el("button", null, "Compare to previous version");
+      compareBtn.onclick = async () => {
+        const diffContainer = $("diff-container-" + card.artifact_id);
+        if (diffContainer) {
+          // Toggle visibility
+          if (diffContainer.style.display === "none") {
+            diffContainer.style.display = "block";
+            // Fetch and render diff if empty
+            if (!diffContainer.children.length) {
+              const loadingMsg = el("p");
+              loadingMsg.style.color = "var(--fg-muted)";
+              loadingMsg.textContent = "Loading diff...";
+              diffContainer.appendChild(loadingMsg);
+
+              const diffData = await fetchDiff(
+                card.artifact_id,
+                prevVersion.version_id,
+                card.selected_version.version_id
+              );
+              diffContainer.innerHTML = "";
+              if (diffData) {
+                renderDiff(diffContainer, diffData);
+              } else {
+                const errMsg = el("p");
+                errMsg.style.color = "var(--fg-muted)";
+                errMsg.textContent = "Failed to load diff";
+                diffContainer.appendChild(errMsg);
+              }
+            }
+          } else {
+            diffContainer.style.display = "none";
+          }
+        }
+      };
+      compareRow.appendChild(compareBtn);
+      body.appendChild(compareRow);
+    }
+  }
+
   fold.appendChild(body);
   return fold;
 }
@@ -590,6 +689,12 @@ function buildCard(card, minimal = false) {
       box.appendChild(formFields(card));
     } else {
       box.appendChild(contentBlock(card));
+
+      // Add a container for diff display (populated when "Compare to previous version" is clicked)
+      const diffContainer = el("div");
+      diffContainer.id = "diff-container-" + card.artifact_id;
+      diffContainer.style.display = "none";
+      box.appendChild(diffContainer);
     }
 
     const prompt = promptFold(card);
