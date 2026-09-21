@@ -13,37 +13,53 @@ class TestQuestionnairePreset:
         """Verify questionnaire.json preset loads and validates."""
         config = load_preset("questionnaire")
         assert config.id == "questionnaire"
-        assert config.title == "Questionnaire"
+        assert config.title == "Project Kickoff Questionnaire"
         assert config.schema_version == "1"
 
     def test_questionnaire_stages(self):
         """Verify questionnaire stage structure."""
         config = load_preset("questionnaire")
-        assert config.stage_order == ["questions"]
+        assert config.stage_order == ["intake", "summary"]
 
-        questions = config.get_stage("questions")
-        assert questions.artifact_type == "form"
-        assert questions.depends_on == []
-        assert "edit" in questions.allowed_actions
-        assert "revise" in questions.allowed_actions
-        assert "approve" in questions.allowed_actions
+        intake = config.get_stage("intake")
+        assert intake.artifact_type == "form"
+        assert intake.depends_on == []
+        assert intake.approval_required is True
+        for action in ("edit", "revise", "approve", "reopen"):
+            assert action in intake.allowed_actions
+
+        summary = config.get_stage("summary")
+        assert summary.artifact_type == "text"
+        assert summary.depends_on == ["intake"]
+        assert summary.approval_required is True
 
     def test_questionnaire_form_schema(self):
         """Verify questionnaire form_schema is present and valid."""
         config = load_preset("questionnaire")
-        questions = config.get_stage("questions")
-        assert questions.form_schema is not None
-        assert questions.form_schema["type"] == "object"
-        assert "properties" in questions.form_schema
-        assert "question_1" in questions.form_schema["properties"]
-        assert "question_2" in questions.form_schema["properties"]
-        assert "question_3" in questions.form_schema["properties"]
+        intake = config.get_stage("intake")
+        assert intake.form_schema is not None
+        assert intake.form_schema["type"] == "object"
+        properties = intake.form_schema["properties"]
+        for field in ("project_name", "goal", "target_users", "timeline",
+                      "budget", "tech_stack", "biggest_risk"):
+            assert field in properties
+            assert properties[field]["title"]
+
+        # The two enum fields constrain their answers; the rest are free text.
+        assert properties["timeline"]["enum"] == [
+            "1-2 weeks", "1 month", "2-3 months", "6+ months"
+        ]
+        assert properties["budget"]["enum"] == [
+            "< $5k", "$5k-$20k", "$20k-$100k", "$100k+"
+        ]
 
     def test_questionnaire_completion_rule(self):
         """Verify questionnaire completion rules."""
         config = load_preset("questionnaire")
-        assert config.completion["require_approved_stages"] == ["questions"]
-        assert config.is_completed({"questions"})
+        assert config.completion["require_approved_stages"] == ["intake", "summary"]
+        assert config.is_completed({"intake", "summary"})
+        # summary depends on intake, so intake alone must not complete it
+        assert not config.is_completed({"intake"})
 
 
 class TestPlanReviewPreset:

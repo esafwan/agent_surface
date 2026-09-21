@@ -1,34 +1,58 @@
 {
   "schema_version": "1",
   "id": "questionnaire",
-  "title": "Questionnaire",
+  "title": "Project Kickoff Questionnaire",
   "stages": [
     {
-      "id": "questions",
+      "id": "intake",
       "artifact_type": "form",
-      "allowed_actions": ["edit", "revise", "approve"],
-      "approval_required": false,
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true,
       "form_schema": {
         "type": "object",
         "properties": {
-          "question_1": {
+          "project_name": {
             "type": "string",
-            "title": "Question 1"
+            "title": "What is your project name?"
           },
-          "question_2": {
+          "goal": {
             "type": "string",
-            "title": "Question 2"
+            "title": "What is the main goal of this project?"
           },
-          "question_3": {
+          "target_users": {
             "type": "string",
-            "enum": ["Option A", "Option B", "Option C"],
-            "title": "Question 3 (Multiple Choice)"
+            "title": "Who are the target users?"
+          },
+          "timeline": {
+            "type": "string",
+            "enum": ["1-2 weeks", "1 month", "2-3 months", "6+ months"],
+            "title": "Expected timeline?"
+          },
+          "budget": {
+            "type": "string",
+            "enum": ["< $5k", "$5k-$20k", "$20k-$100k", "$100k+"],
+            "title": "Budget range?"
+          },
+          "tech_stack": {
+            "type": "string",
+            "title": "Preferred tech stack (if any)?"
+          },
+          "biggest_risk": {
+            "type": "string",
+            "title": "What is the biggest risk or unknown?"
           }
         }
       }
+    },
+    {
+      "id": "summary",
+      "artifact_type": "text",
+      "depends_on": ["intake"],
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true
     }
   ],
   "completion": {
-    "require_approved_stages": ["questions"]
+    "require_approved_stages": ["intake", "summary"]
   }
 }

@@ -617,8 +617,11 @@ class TestConstrainFilePaths:
 
         run_dir = cli.runtime_dir()
 
-        # The runtime dir should be a sibling of the store, not arbitrary
-        assert run_dir.parent == Path(db_path).parent
+        # The runtime dir should be a sibling of the store, not arbitrary.
+        # Compare resolved paths on both sides: runtime_dir() resolves (that
+        # is what prevents traversal), and on macOS the temp dir is a symlink
+        # (/var -> /private/var), so an unresolved comparison fails there.
+        assert run_dir.parent == Path(db_path).resolve().parent
         assert "run" in str(run_dir)
 
     def test_media_dir_path_is_constrained(self, temp_project):
