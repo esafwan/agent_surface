@@ -273,6 +273,37 @@ body {
   font-family: var(--font-mono); overflow-wrap: anywhere;
 }
 
+/* --- mermaid diagrams ----------------------------------------------------- */
+.mermaid-diagram {
+  margin: var(--s4) 0;
+  padding: var(--s4);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-height: 540px;
+}
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+.mermaid-diagram-error {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s4);
+  margin: var(--s4) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* --- details blocks (prompt/notes, version history) --------------------- */
 details.fold { margin-top: var(--s3); }
 details.fold summary {

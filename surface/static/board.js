@@ -46,6 +46,85 @@ function rememberInput(input, artifactId, slot) {
   return input;
 }
 
+// --- mermaid helpers -------------------------------------------------------
+
+// mermaid.js's own error path is NOT contained to the container you gave it:
+// on a parse/render failure it appends its own error SVG (a bomb icon +
+// "Syntax error in text") directly to document.body as a side effect,
+// before the exception even reaches this file's try/catch -- so the caller
+// catching the rejection and showing a text fallback (below) does not stop
+// that debris from appearing, floating below the whole page. mermaid v10.3+
+// exposes suppressErrorRendering specifically to turn this off; initialize
+// it once, defensively, before the first render call.
+let mermaidInitialized = false;
+function ensureMermaidInitialized() {
+  if (mermaidInitialized || !window.mermaid) return;
+  try {
+    window.mermaid.initialize({ startOnLoad: false, suppressErrorRendering: true });
+  } catch (err) {
+    console.warn('mermaid.initialize failed:', err);
+  }
+  mermaidInitialized = true;
+}
+
+// Extract mermaid fenced blocks from text. Returns an array of objects with
+// { type: 'text' | 'mermaid', content: string }
+function extractMermaidBlocks(text) {
+  const blocks = [];
+  const mermaidRegex = /```mermaid\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = mermaidRegex.exec(text)) !== null) {
+    // Add text before this mermaid block
+    if (match.index > lastIndex) {
+      blocks.push({ type: 'text', content: text.substring(lastIndex, match.index) });
+    }
+    // Add the mermaid block
+    blocks.push({ type: 'mermaid', content: match[1].trim() });
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Add any remaining text after the last mermaid block
+  if (lastIndex < text.length) {
+    blocks.push({ type: 'text', content: text.substring(lastIndex) });
+  }
+
+  // If no mermaid blocks were found, return the entire text as a single text block
+  if (blocks.length === 0) {
+    blocks.push({ type: 'text', content: text });
+  }
+
+  return blocks;
+}
+
+// Render a mermaid diagram into a container element. Returns true on success,
+// false on failure (in which case the caller should render the raw text instead).
+async function renderMermaidDiagram(container, diagramText) {
+  if (!window.mermaid) {
+    console.warn('mermaid not loaded');
+    return false;
+  }
+  ensureMermaidInitialized();
+  // Belt-and-braces: even with suppressErrorRendering set, don't trust a
+  // CDN-pinned "@10" (a moving minor/patch version) to honor it forever.
+  // Snapshot document.body's children so a failed render's own DOM debris
+  // -- wherever mermaid decided to put it -- can be swept up regardless of
+  // its id/class naming, which varies by version.
+  const before = new Set(document.body.children);
+  try {
+    const { svg } = await window.mermaid.render('mermaid-' + Date.now(), diagramText);
+    container.innerHTML = svg;
+    return true;
+  } catch (err) {
+    console.warn('Failed to render mermaid diagram:', err);
+    for (const node of Array.from(document.body.children)) {
+      if (!before.has(node)) node.remove();
+    }
+    return false;
+  }
+}
+
 // --- in-flight -------------------------------------------------------------
 
 function paintInflight() {
@@ -220,7 +299,43 @@ function contentBlock(card) {
       if (card.selected_version && card.selected_version.content_type === "application/json") {
         box.classList.add("json");
       }
-      box.textContent = card.content_text;   // text node: newlines survive
+
+      // Check if content has mermaid blocks
+      const blocks = extractMermaidBlocks(card.content_text);
+      const hasMermaid = blocks.some(b => b.type === 'mermaid');
+
+      if (hasMermaid) {
+        // Build the content with mermaid diagrams
+        blocks.forEach((block, idx) => {
+          if (block.type === 'text') {
+            // Add text content as a text node
+            if (block.content) {
+              box.appendChild(document.createTextNode(block.content));
+            }
+          } else {
+            // Create a container for the mermaid diagram
+            const diagramContainer = el("div", "mermaid-diagram");
+            box.appendChild(diagramContainer);
+
+            // Render the diagram asynchronously
+            renderMermaidDiagram(diagramContainer, block.content).then(success => {
+              if (!success) {
+                // Fallback: show the raw fenced block as text
+                diagramContainer.className = "mermaid-diagram-error";
+                diagramContainer.textContent = "```mermaid\n" + block.content + "\n```";
+              }
+            }).catch(err => {
+              // Double fallback for any uncaught errors
+              diagramContainer.className = "mermaid-diagram-error";
+              diagramContainer.textContent = "```mermaid\n" + block.content + "\n```";
+              console.error("Mermaid rendering error:", err);
+            });
+          }
+        });
+      } else {
+        // No mermaid blocks, render as plain text
+        box.textContent = card.content_text;   // text node: newlines survive
+      }
     }
     return box;
   }

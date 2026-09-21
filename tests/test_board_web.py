@@ -463,3 +463,79 @@ def test_index_and_static_assets_are_served(client):
 
     js = client.get("/static/board.js")
     assert js.status_code == 200
+
+
+def test_mermaid_markdown_content_is_passed_through():
+    """Verify that markdown with mermaid fenced blocks is correctly included in state payload.
+
+    The mermaid rendering happens client-side in board.js, so the server just needs to
+    pass the content through unchanged. This test verifies that.
+    """
+    config = load_preset("poem")
+    store = Store(":memory:")
+
+    mermaid_content = """# Architecture
+
+Here's a diagram:
+
+```mermaid
+graph TD
+    A[Start] --> B[Process]
+    B --> C{Decision}
+    C -->|Yes| D[End]
+```
+
+And some text after.
+"""
+
+    store.create_artifact(id="poem_001", stage="poem", title="Mermaid Diagram")
+    store.put_version(
+        "poem_001",
+        content=mermaid_content,
+        content_type="text/markdown",
+        created_by="test",
+        select=True,
+    )
+
+    payload = build_state_payload(
+        DisplayModelBuilder(store, config).build_board_display(), config
+    )
+
+    # Verify the artifact is in the payload
+    assert len(payload["stages"][0]["artifacts"]) == 1
+    card = payload["stages"][0]["artifacts"][0]
+    assert card["title"] == "Mermaid Diagram"
+    assert card["content_kind"] == "text"
+
+    # Verify the mermaid content is included unchanged (client-side code will render it)
+    assert "```mermaid" in card["content_text"]
+    assert "graph TD" in card["content_text"]
+    assert "And some text after" in card["content_text"]
+
+
+def test_plain_text_without_mermaid_is_passed_through():
+    """Verify that plain text content without mermaid blocks works correctly."""
+    config = load_preset("poem")
+    store = Store(":memory:")
+
+    plain_content = """This is plain text.
+It has multiple lines.
+No special formatting here."""
+
+    store.create_artifact(id="poem_001", stage="poem", title="Plain Text")
+    store.put_version(
+        "poem_001",
+        content=plain_content,
+        content_type="text/plain",
+        created_by="test",
+        select=True,
+    )
+
+    payload = build_state_payload(
+        DisplayModelBuilder(store, config).build_board_display(), config
+    )
+
+    card = payload["stages"][0]["artifacts"][0]
+    assert card["title"] == "Plain Text"
+    assert card["content_kind"] == "text"
+    assert card["content_text"] == plain_content
