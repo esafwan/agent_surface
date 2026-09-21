@@ -602,11 +602,20 @@ graph TD
 
 ### Version Diff Feature
 
-Any artifact with 2+ versions gets a "Compare to previous version" control on
-the card. Diffs are computed server-side (using Python's `difflib.unified_diff`)
-and returned as line-by-line JSON; they are never cached client-side. This ensures
-that a refresh or a second browser tab always shows a diff computed from the
-current store state.
+A **text** artifact with 2+ versions, when the currently selected version
+isn't the first one, gets a "Compare to previous version" control on the
+card. Form, image, video, and audio artifacts don't -- the diff endpoint
+only supports text content, and the control is not rendered for content it
+can't act on. Diffs are computed server-side (using Python's
+`difflib.unified_diff`) and returned as line-by-line JSON; they are never
+cached client-side. This ensures that a refresh or a second browser tab
+always shows a diff computed from the current store state.
+
+One real gap worth knowing: `difflib` diffs by exact line content, so
+content with mixed line endings (e.g. one version saved with CRLF, the
+next with LF) can show every line as changed even when only one or two
+words differ -- the real edit gets lost in the noise. Nothing here
+normalizes line endings before diffing.
 
 The diff endpoint is `/api/diff/<artifact_id>?from=<version_id>&to=<version_id>`.
 

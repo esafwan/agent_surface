@@ -264,8 +264,20 @@ def _mermaid_label(title: Optional[str], artifact_id: str, locked: bool) -> str:
     label = title or artifact_id
     if locked:
         label = "\U0001F512 " + label
-    # Escape quotes so the label stays inside Mermaid's quoted node text.
-    label = label.replace('"', "'")
+    # A worker-written title reaches the DOM as SVG via innerHTML (the
+    # mermaid render path), so this is not just quote-escaping for Mermaid's
+    # own grammar -- it's the only thing standing between an artifact title
+    # and real markup. A title of "<img src=x>PWN" previously produced an
+    # actual <img> element in the rendered graph (mermaid's bundled
+    # DOMPurify stops handler attributes like onerror from firing, but not
+    # the element or its src, so it could still trigger an outbound
+    # request). Remove the characters that can form a tag outright, rather
+    # than HTML-entity-encoding them -- an entity-encoded label would render
+    # as literal "&lt;...&gt;" gibberish in the diagram; stripping keeps the
+    # label readable while making a tag impossible to construct.
+    for bad in ("<", ">", "&"):
+        label = label.replace(bad, "")
+    label = label.replace('"', "'")  # keep the label inside Mermaid's own quoted syntax
     return label
 
 

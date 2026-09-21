@@ -127,7 +127,7 @@ Custom stage configs are plain JSON validated against the same schema (see `surf
 The default web renderer (`--renderer web`) includes:
 
 - **Mermaid diagram support**: any text/markdown artifact with fenced `` ```mermaid ``` `` blocks renders them as diagrams automatically, useful for specs and architecture diagrams.
-- **Version diff**: artifacts with 2+ versions show a "Compare to previous version" control, with server-side line-by-line diffs computed fresh on each load.
+- **Version diff**: text artifacts with 2+ versions (when the selected version isn't the first) show a "Compare to previous version" control, with server-side line-by-line diffs computed fresh on each load. Not shown for form/image/video/audio content, which the diff endpoint doesn't support.
 - **Dependency graph view**: a "Dependencies" button on any card displays its upstream/downstream neighbors as a status-colored Mermaid graph, updating live without restart.
 
 ## Architecture at a glance

@@ -595,6 +595,54 @@ def test_task_board_groups_artifacts_by_status(task_board_store, task_board_conf
     assert approved_count == 1
 
 
+# Store.ARTIFACT_STATUSES-equivalent -- kept explicit here rather than
+# imported, so this test breaks loudly if the status vocabulary ever changes
+# without a corresponding update. surface/static/board.js's buildColumnView()
+# has its own independent mapping from status -> column label with no shared
+# source of truth and no JS test infrastructure in this repo to check it
+# directly (no package.json, no jest/vitest) -- "stale" was silently missing
+# from that mapping for a real production status (auto-assigned by
+# Store._propagate_stale on any downstream artifact whenever an upstream
+# gets a new version, which is routine for task-to-task dependencies) and a
+# task in that status vanished from the board with no column, no count, no
+# trace. This test cannot exercise the JS mapping itself, but it locks down
+# the server-side status set this codebase actually uses, as the closest
+# available tripwire: if a new status is ever added to that set without a
+# matching board.js column, at minimum this list needs a deliberate,
+# visible edit to keep passing, which is a chance to remember the other side.
+ALL_ARTIFACT_STATUSES = {
+    "draft", "generating", "review", "approved", "stale", "failed", "cancelled",
+}
+
+
+def test_task_board_server_state_covers_every_status_including_stale(task_board_config):
+    """Every status this codebase assigns to an artifact must reach the
+    client state payload correctly -- including "stale", which is not
+    user-chosen (Store._propagate_stale assigns it automatically) and was
+    the one silently dropped by board.js's column mapping."""
+    store = Store(":memory:")
+    for status in sorted(ALL_ARTIFACT_STATUSES):
+        artifact_id = f"status_check_{status}"
+        store.create_artifact(id=artifact_id, stage="tasks", title=status, status=status)
+        store.put_version(
+            artifact_id, content="x", content_type="text/plain",
+            created_by="worker", select=True,
+        )
+
+    builder = DisplayModelBuilder(store, task_board_config)
+    payload = build_state_payload(builder.build_board_display(), task_board_config)
+    artifacts = payload["stages"][0]["artifacts"]
+
+    statuses_in_payload = {a["status"] for a in artifacts}
+    assert statuses_in_payload == ALL_ARTIFACT_STATUSES, (
+        "the server's status set no longer matches ALL_ARTIFACT_STATUSES -- "
+        "if you added/removed a status here, surface/static/board.js's "
+        "buildColumnView() statusColumns mapping needs the same change, "
+        "checked by hand since there is no JS test suite for it"
+    )
+    assert len(artifacts) == len(ALL_ARTIFACT_STATUSES)
+
+
 def test_task_board_only_allows_approve_and_reopen_actions(task_board_store, task_board_config):
     """Verify the task_board preset only allows approve and reopen actions."""
     stage = task_board_config.get_stage("tasks")

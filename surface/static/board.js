@@ -523,8 +523,17 @@ function historyFold(card) {
     body.appendChild(row);
   });
 
-  // Add compare button if selected version exists and there's a previous version
-  if (card.selected_version && card.all_versions.length >= 2) {
+  // Add compare button if selected version exists and there's a previous version.
+  // Only for text content: the server's diff endpoint 400s on anything else
+  // (form/image/video/audio), and buildCard() only creates a diff-container
+  // for the non-form branch -- without this gate the button rendered on
+  // every multi-version card regardless of type. On a form artifact
+  // (e.g. questionnaire's intake stage) that meant a button whose click
+  // handler found no container and did visibly nothing: no diff, no error,
+  // no feedback at all. On image/video/audio it rendered a container and
+  // showed "Failed to load diff" -- a control that shouldn't exist there
+  // producing an error instead of not existing.
+  if (card.content_kind === "text" && card.selected_version && card.all_versions.length >= 2) {
     const selectedIdx = card.all_versions.findIndex(v => v.is_selected);
     if (selectedIdx > 0) {
       const prevVersion = card.all_versions[selectedIdx - 1];
@@ -833,11 +842,19 @@ function buildColumnView(stage) {
   const container = el("div", "columns-container");
 
   // Status to column label mapping
+  // Every value of Store's artifact status enum needs a column, or a task
+  // in that status silently vanishes from the board with no count, no
+  // trace -- exactly what happened to "stale" here: it's not a
+  // user-facing decision, it's automatically assigned by
+  // Store._propagate_stale whenever an upstream dependency gets a new
+  // version, which is routine for task-to-task dependencies -- the
+  // scenario this preset exists for.
   const statusColumns = {
     draft: "Planned",
     generating: "In Progress",
     review: "Needs Approval",
     approved: "Done",
+    stale: "Stale",
     failed: "Failed",
     cancelled: "Cancelled"
   };
