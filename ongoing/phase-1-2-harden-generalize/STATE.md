@@ -41,22 +41,48 @@ gating fix).
 | `render` + bounded wait convenience mode | Done and closed end-to-end: `surface render` creates a handle, `surface answer <handle> --value <json>` answers it, `surface wait <handle> --max N` polls bounded by `--max` and returns the exact `{"status":...}` shapes from SPEC section 35. Backed by a local JSON file store under `.surface-board/interactions/`, not the SQLite store — a deliberate, documented simplification rather than inventing new artifact/event semantics. Verified via real CLI subprocess calls (not just direct Python calls in tests). |
 | Custom stage-config authoring guide | Done: `docs/stage-config-guide.md`, cross-checked against the live `config.py` validation code. |
 
-## Known gaps carried forward (not attempted this round)
+## Post-session update (2026-09-21): gradio installed, board live-tested and fixed
 
-- **Board live-refresh** (Phase 0 debt, reconfirmed still open): the artifact/version card
-  tree is built once at `build_board()` launch; `Refresh` updates only the header/status
-  line. Needs a `gr.Timer`- or bounded-slot-driven rebuild — deferred because it requires
-  gradio actually installed to verify (not available in this dev/test environment), and an
-  unverified rewrite is exactly what produced real bugs in an earlier fix round.
-- **Board visual redesign is unverified by any real render.** `surface/board.py`'s Gradio
-  layout was substantially redesigned for visual quality (compact metadata line, content
-  given visual prominence, action-bar with variant-differentiated buttons, a real CSS
-  stylesheet) without gradio installed to actually run it. A senior review found no
-  hard-crash-class API misuse by careful reading, but **this must be visually verified
-  once gradio is installed** before trusting it in production.
+Everything below this line happened after the table above was written, once gradio 5.50
+was actually installed and the board could be run in a real browser (gradio 6.28 was tried
+first and found to crash — a Svelte "effect_orphan" error, blank page; pinned to `<6`).
+
+- **Board live-refresh: FIXED.** Was flagged below as deferred; once gradio was installed
+  it became fixable and was fixed. `build_board()`'s dynamic region (tabs, cards, version
+  history, forms, action bar) now rebuilds via `@gr.render()` on a 2-second timer plus
+  immediately after any action. Verified with a live multi-step round trip (approve ->
+  instant update; async edit -> auto-picked-up within ~2s; navigate away and back -> state
+  holds, no crash).
+- **Real thread-safety bug found and fixed.** Live testing crashed the board with "SQLite
+  objects created in a thread can only be used in that same thread" on the second tab
+  click — Gradio dispatches each callback to its own thread, but the Store's connection
+  was created once and reused across threads. Fixed: `check_same_thread=False` +
+  `Store`-wide `RLock`. Proven with real multi-threaded regression tests.
+- **JSON-Schema form rendering was entirely missing, not just "unverified."** The
+  questionnaire preset's `form_schema` was never actually turned into form fields — a
+  "form"-typed artifact rendered as a raw, hand-editable JSON blob. Built proper
+  `schema_properties`/`parse_form_answers`/`build_form_answers_json` + native
+  Textbox/Dropdown/Number/Checkbox rendering. Verified live: filled a 3-field form
+  (including a dropdown), submitted, confirmed the real worker wrote back the exact JSON.
+- **The visual redesign's biggest problem was real, not cosmetic:** every form field label
+  rendered as a colored pill badge — Gradio's own `BlockTitle` Svelte component, not
+  anything in BOARD_CSS. No CSS-variable tuning could have fixed this; the fix was
+  disabling Gradio's native `label=` entirely and rendering custom typography instead.
+  Committed to one restrained visual language (quiet borders, single accent color used
+  sparingly) grounded in gradio 5.50's actual shipped CSS/JS, then verified live.
+  Also fixed: the width CSS didn't actually widen anything (Gradio's own
+  `display:flex` container has no `width`, so `max-width` alone was a no-op) — confirmed
+  by measuring computed width in a real browser (514px on a 1920px viewport before the
+  fix, 1600px after).
 - **`get_project_cost_summary()` unsurfaced** by any CLI command — implemented and
-  correct, just not exposed as a convenience.
-- **ACP transport unverified** — see table above.
+  correct, just not exposed as a convenience. Still open.
+- **ACP transport unverified** — see table above. Still open.
+
+**Lesson for future sessions:** every one of the items above was previously logged as
+"can't verify, no browser/gradio available" and left as a documented limitation. Every
+single one turned out to hide a real bug once actually run. Treat "unverified because the
+tool wasn't installed" as a loud signal to install the tool and check, not a reason to
+trust the code as-is.
 - Multi-process supervisor pools, richer tracing beyond rehydration, hosted/shared board
   service, multi-user collaboration — Phase 3 territory or explicitly out of v1 scope per
   SPEC (see `PHASE3.md` in this directory for the full accounting).

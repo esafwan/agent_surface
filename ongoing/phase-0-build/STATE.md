@@ -63,16 +63,17 @@ The end-to-end loop has been manually verified working (not just unit-tested): a
 event seeded directly into the store was claimed by a live `Supervisor`, dispatched to a
 real `python -m surface.worker` subprocess, and produced a correctly-attributed version.
 
-### Known deliberate gap: board live-refresh (not fixed)
+### Board live-refresh: fixed (2026-09-21, gradio actually installed and tested)
 
-`surface/board.py`'s Gradio wiring still builds its artifact/version card tree once at
-launch; `refresh_board()` updates only summary text, not the live card tree. A second
-review round flagged this as significant. Fixing it properly requires a `gr.Timer`- or
-bounded-slot-driven rebuild of the whole card tree — a nontrivial rewrite of Gradio wiring
-that this environment cannot runtime-verify (gradio is not installed here), which is
-exactly the blind spot that produced the S3/S4/S6/S7/S8 regressions fixed above. Left open
-rather than risk another unverified rewrite. **Do this first in Phase 1**, with gradio
-actually installed so the fix can be run, not just read.
+Originally left open here as a deliberate deferral (gradio wasn't installed in this
+environment, and an unverified rewrite is exactly what produced the S3/S4/S6/S7/S8
+regressions). Once gradio was installed and the board could actually be run and clicked
+through in a real browser, this was fixed: `build_board()`'s artifact/version card tree is
+now wrapped in a `@gr.render()`-decorated function that rebuilds from a fresh store query
+on a 2-second timer plus immediately after any action, replacing the old "restart to see
+changes" behavior. Verified live with a genuine multi-step round trip (approve -> live
+update, async edit -> auto-picked-up within ~2s, navigate away and back -> state holds).
+See `ongoing/phase-1-2-harden-generalize/STATE.md` for the fix details.
 
 Also open/never attempted this round (smaller, lower severity): `SupervisorConfig.turn_timeout`
 is set but not plumbed into the transport (the real bound is `NativeStreamTransport`'s own

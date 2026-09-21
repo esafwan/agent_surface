@@ -408,7 +408,9 @@ When delegating to a sub-agent:
   generic_media_pipeline presets, and a custom stage-config authoring guide
   (`docs/stage-config-guide.md`)
 - Gradio board UI (if available; graceful fallback if not), with select-
-  version conflict surfacing
+  version conflict surfacing and live-refresh (a 2-second poll plus
+  immediate post-action updates -- new versions/status changes appear
+  without restarting `surface serve`, verified via live browser testing)
 - Event inbox with leases, bounded dispatch retry, session recycling and a
   per-artifact worker pool (`surface serve --pool-size N`,
   `--recycle-after-events N`) -- default remains one serial worker session
@@ -438,9 +440,6 @@ When delegating to a sub-agent:
 - Hosted/shared board service
 - MCP Apps / A2UI renderers
 - A verified ACP integration (see above)
-- Live board refresh (the board's artifact/version display is built once
-  at launch; `Refresh` updates the header/status line only, not the full
-  card tree -- restart `surface serve` to see new versions/status)
 - Budget confirmation UI (deterministic backend only)
 - Robust error recovery (basic retry on lease expiry)
 

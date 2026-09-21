@@ -26,13 +26,15 @@ open are tracked in [`ongoing/phase-0-build/STATE.md`](ongoing/phase-0-build/STA
   with an authenticated loopback bind (unpredictable per-run token) for remote-adjacent access.
 
 **Status of the Gradio board:** live-tested in a real browser (gradio 5.50 — see below for
-why the version matters). What's confirmed working: thread-safe under real Gradio request
-dispatch, JSON-Schema-driven form rendering for `form`-typed artifacts (native text/
-dropdown/number/checkbox controls instead of a raw JSON blob), and a desktop-width layout.
-**Known gap:** the board builds its artifact/version display once at launch — it does not
-yet live-refresh when versions/status change without restarting the process. This is the
-top remaining item for Phase 1. The stdlib `surface tui` command (see below) has no such
-gap and needs no gradio install at all.
+why the version matters), including a genuine multi-step round trip: approve an artifact,
+watch the status flip live; edit it (an async, worker-driven event), watch the new version
+appear automatically within ~2 seconds with no manual refresh; navigate away to another
+stage tab and back, confirm state holds correctly. What's confirmed working: thread-safe
+under real Gradio request dispatch, live-refresh (a 2-second poll plus immediate
+post-action updates, replacing the old "restart to see changes" behavior), JSON-Schema-
+driven form rendering for `form`-typed artifacts (native text/dropdown/number/checkbox
+controls instead of a raw JSON blob), and a desktop-width layout with Gradio's own
+pill-badge label styling removed in favor of a plain, restrained design language.
 
 **Gradio version pin:** use gradio `>=4.0,<6` (`pip install -e ".[board]"` already pins
 this). Gradio 6's frontend (a Svelte 5 rewrite) throws a `effect_orphan` error and renders
