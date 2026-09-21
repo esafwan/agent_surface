@@ -48,6 +48,25 @@ function rememberInput(input, artifactId, slot) {
 
 // --- mermaid helpers -------------------------------------------------------
 
+// mermaid.js's own error path is NOT contained to the container you gave it:
+// on a parse/render failure it appends its own error SVG (a bomb icon +
+// "Syntax error in text") directly to document.body as a side effect,
+// before the exception even reaches this file's try/catch -- so the caller
+// catching the rejection and showing a text fallback (below) does not stop
+// that debris from appearing, floating below the whole page. mermaid v10.3+
+// exposes suppressErrorRendering specifically to turn this off; initialize
+// it once, defensively, before the first render call.
+let mermaidInitialized = false;
+function ensureMermaidInitialized() {
+  if (mermaidInitialized || !window.mermaid) return;
+  try {
+    window.mermaid.initialize({ startOnLoad: false, suppressErrorRendering: true });
+  } catch (err) {
+    console.warn('mermaid.initialize failed:', err);
+  }
+  mermaidInitialized = true;
+}
+
 // Extract mermaid fenced blocks from text. Returns an array of objects with
 // { type: 'text' | 'mermaid', content: string }
 function extractMermaidBlocks(text) {
@@ -82,17 +101,26 @@ function extractMermaidBlocks(text) {
 // Render a mermaid diagram into a container element. Returns true on success,
 // false on failure (in which case the caller should render the raw text instead).
 async function renderMermaidDiagram(container, diagramText) {
+  if (!window.mermaid) {
+    console.warn('mermaid not loaded');
+    return false;
+  }
+  ensureMermaidInitialized();
+  // Belt-and-braces: even with suppressErrorRendering set, don't trust a
+  // CDN-pinned "@10" (a moving minor/patch version) to honor it forever.
+  // Snapshot document.body's children so a failed render's own DOM debris
+  // -- wherever mermaid decided to put it -- can be swept up regardless of
+  // its id/class naming, which varies by version.
+  const before = new Set(document.body.children);
   try {
-    if (!window.mermaid) {
-      console.warn('mermaid not loaded');
-      return false;
-    }
-    // Use mermaid's render function to generate SVG
     const { svg } = await window.mermaid.render('mermaid-' + Date.now(), diagramText);
     container.innerHTML = svg;
     return true;
   } catch (err) {
     console.warn('Failed to render mermaid diagram:', err);
+    for (const node of Array.from(document.body.children)) {
+      if (!before.has(node)) node.remove();
+    }
     return false;
   }
 }
