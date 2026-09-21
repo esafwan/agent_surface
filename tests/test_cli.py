@@ -686,6 +686,7 @@ class TestServeRuntime:
             db=db_path,
             max_iterations=1,
             board=True,
+            renderer="gradio",
             worker_command=ECHO_WORKER_COMMAND,
         )
         output = json.loads(capsys.readouterr().out)
@@ -707,6 +708,65 @@ class TestServeRuntime:
             db=db_path,
             max_iterations=1,
             board=True,
+            renderer="gradio",
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert output["ok"] is True
+        assert output["board"] == "unavailable"
+
+    def test_serve_uses_the_web_renderer_by_default(self, serve_project, monkeypatch, capsys):
+        """`surface serve` with no --renderer serves surface.board_web.
+
+        The Gradio path still exists behind `--renderer gradio`, but it is no
+        longer what runs: its header could not distinguish an empty inbox
+        from an unclaimed click. This pins which renderer is actually wired
+        in, so the repo can never silently serve the one we did not intend.
+        """
+        pytest.importorskip("fastapi")
+        cli, db_path = serve_project
+        built = {}
+
+        def _fake_app(store, cfg, token):
+            built["token"] = token
+            built["cfg"] = cfg
+            return object()
+
+        monkeypatch.setattr(cli, "_build_board_app", _fake_app)
+        # Never actually bind a port in the test suite.
+        monkeypatch.setattr(
+            "uvicorn.run", lambda app, **kwargs: built.update(launch=kwargs)
+        )
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+        )
+        output = json.loads(capsys.readouterr().out)
+
+        assert output["board"] == "running"
+        assert built["token"] == cli.runtime_info["token"]
+        run_dir = Path(db_path).resolve().parent / "run"
+        assert (run_dir / "board.pid").read_text() == str(os.getpid())
+
+    def test_serve_survives_a_missing_web_board_dependency(
+        self, serve_project, monkeypatch, capsys
+    ):
+        """No FastAPI installed: headless supervisor + poller, not a crash."""
+        cli, db_path = serve_project
+
+        def _boom(store, cfg, token):
+            raise ImportError("No module named 'fastapi'")
+
+        monkeypatch.setattr(cli, "_build_board_app", _boom)
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
             worker_command=ECHO_WORKER_COMMAND,
         )
         output = json.loads(capsys.readouterr().out)
@@ -714,7 +774,11 @@ class TestServeRuntime:
         assert output["board"] == "unavailable"
 
     def test_serve_launches_board_when_available(self, serve_project, monkeypatch, capsys):
-        """When build_board returns Blocks, launch() is called on loopback with auth."""
+        """When build_board returns Blocks, launch() is called on loopback with auth.
+
+        Explicitly `--renderer gradio`: the legacy path is kept working, it is
+        just no longer the default.
+        """
         cli, db_path = serve_project
         launched = {}
         done = threading.Event()
@@ -730,6 +794,7 @@ class TestServeRuntime:
             db=db_path,
             max_iterations=1,
             board=True,
+            renderer="gradio",
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
         )

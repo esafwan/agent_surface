@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Surface Board</title>
+<link rel="stylesheet" href="/static/board.css">
+</head>
+<body>
+<div id="progress"></div>
+
+<div class="wrap">
+  <header class="rail">
+    <span class="brand" id="brand">Agent Surface</span>
+    <span class="state">
+      <span class="dot idle" id="dot"></span>
+      <span id="statelabel">…</span>
+    </span>
+  </header>
+
+  <nav class="tabs" id="tabs" hidden></nav>
+
+  <p class="notice" id="notice" hidden></p>
+
+  <main id="cards"></main>
+</div>
+
+<script src="/static/board.js"></script>
+</body>
+</html>

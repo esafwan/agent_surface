@@ -52,9 +52,9 @@ This launches:
 1. **Store** — SQLite artifact/version/event store (already exists from `init`)
 2. **Supervisor** — claims events and drives a worker
 3. **Poller** — polls generation jobs and emits completions
-4. **Board** — Gradio UI (if installed; logs if unavailable)
+4. **Board** — the web renderer by default (`surface/board_web.py`, FastAPI + hand-written HTML/CSS/JS); `--renderer gradio` selects the legacy Gradio board. Either logs and runs headless if its dependency is missing.
 
-By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board (if gradio is installed) launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`) with an auto-generated token written to `<db dir>/run/token`; pass `--no-board` to run supervisor+poller only.
+By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`) with an auto-generated token written to `<db dir>/run/token`; pass `--no-board` to run supervisor+poller only.
 
 The token is the password for HTTP **basic auth**, not a bearer token: log in
 with username `surface` and the token as the password. Note the token lives
@@ -378,27 +378,46 @@ The board shows:
 - Message (free-form)
 - Cancel (job cancellation request)
 
-### Queued Actions Are Invisible
+### Queued Actions Are Visible (web renderer) / Invisible (gradio renderer)
 
-**The board has no "queued" or "worker running" state.** An action in the
-right-hand list above enqueues an event and returns; if no worker claims it,
-the card is byte-for-byte identical to before the click. The header still
-reads "Ready", pending-event count is not shown, and no button disables. A
-queued action and a dead button look the same.
+`surface serve` renders with **`--renderer web`** by default
+(`surface/board_web.py`, FastAPI + `surface/static/`). That renderer shows
+queued work honestly, from the store:
 
-Consequences when driving the board:
+- the header reads `2 queued`, `1 working`, or `Ready` — derived from
+  `Store.list_active_events()` / `count_active_events()`
+  (`status IN ('pending','processing')`), never hardcoded;
+- each card carries its own line, e.g. *"1 queued action — queued 40s ago,
+  waiting for a worker"* vs *"worker is on it — started 6s ago"*;
+- the stage tab shows a dot when anything in it is queued;
+- a click in flight dims the content, disables the controls (restating their
+  colours, so they stay readable), and counts elapsed seconds.
+
+**The legacy `--renderer gradio` board shares this data but not the layout.**
+Both renderers build on the same `DisplayModelBuilder`, so the gradio header
+now also reads "N queued"/"N working" instead of a static "Ready" -- fixing
+the header was a side effect of sharing the status-message logic, not a
+separate gradio-specific fix. What gradio still lacks: the per-card queued
+note ("waiting for a worker"/"worker is on it"), the per-stage-tab dot, and
+disabling controls with readable contrast during a click. A queued action
+there is no longer *invisible*, just less informative than on the web
+renderer.
+
+Either way, when driving the board:
 
 - Start a worker **before** handing the board to a user, and keep it claiming.
-  A lapsed `surface inbox next` poll means clicks silently pile up.
+  A lapsed `surface inbox next` poll means clicks pile up (the web board will
+  at least say so).
 - Verify effects in the **UI**, not just the store. A version committed in
   SQLite proves nothing about what the user can see.
-- The bottom "Message the worker…" box emits a `message` event with
-  `artifact_id: null`, unbound to any artifact and not gated by
-  `allowed_actions`. It looks like the primary input but cannot reach the
-  artifact the user is looking at -- prefer the per-card revise box.
+- The web board's message box is **per card** and always carries that card's
+  `artifact_id`; the server refuses an unbound `message`. The gradio board's
+  footer box still emits `artifact_id: null`, unbound to any artifact and not
+  gated by `allowed_actions` — there, prefer the per-card revise box.
 
-Live refresh itself does work: a `gr.Timer(2)` rebuilds the card tree from a
-fresh store read, so an external write reaches an un-reloaded tab in ~2s.
+Live refresh works in both: the web board polls `GET /api/state` every 2s and
+repaints only when the board's fingerprint changes; the gradio board uses a
+`gr.Timer(2)`. Either way an external write reaches an un-reloaded tab in ~2s.
 
 ### Match Stage Shape to the Work
 
@@ -599,10 +618,10 @@ When delegating to a sub-agent:
   verified against a real ACP SDK, and is not wired into `serve()`; treat
   it as scaffolding for a future integration, not a working ACP path
 - `surface tui` (`surface/tui.py`) -- a stdlib-only, non-Gradio terminal
-  renderer. Reuses `board.py`'s gradio-independent display/action logic. This
-  is the one renderer actually run and verified end-to-end in this dev
-  environment (the Gradio board has not been, since gradio isn't installed
-  here)
+  renderer. Reuses `board.py`'s gradio-independent display/action logic.
+  `--renderer web` (the default board) and `--renderer gradio` (the legacy
+  one) have both since been run and verified end-to-end in this dev
+  environment too, including against a multi-stage config
 - `surface/notify.py` -- `LogNotifier`/`WebhookNotifier` notification
   adapters and a pure `detect_notifications()` diff function; not yet wired
   to fire automatically inside `serve()`'s loop
@@ -621,8 +640,11 @@ When delegating to a sub-agent:
 - **A board-without-supervisor mode** -- needed for agent-as-worker; call
   `build_board()` directly (`examples/02-agent-as-worker/board_only.py`)
 - **`surface store create`** -- artifacts can only be created via the Python API
-- **Any queued/working indicator in the board** -- a pending event is
-  indistinguishable from a dead button (see "Queued Actions Are Invisible")
+- **Per-card queued notes and per-tab dots in the `--renderer gradio` board**
+  -- gradio's header now shows "N queued"/"N working" (shared status-message
+  logic with the web renderer), but it still has no per-card "waiting for a
+  worker" note and no stage-tab indicator. The default `--renderer web`
+  board has both (see "Queued Actions Are Visible")
 - **A renderer for `render`/`wait`/`answer`** -- the handle API exists with
   nothing drawing it (`examples/04-live-surface/loop.py` is a reference implementation)
 

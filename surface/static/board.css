@@ -1,0 +1,387 @@
+/* Agent Surface board — hand-written, no build step, no framework theme to
+ * fight. Design tokens and the light/dark pair are carried over from the
+ * live-surface renderer in examples/04-live-surface so the two read as one
+ * product. Three rules matter most here and are commented where they live:
+ *   - .draft { white-space: pre-wrap }   text keeps its line breaks
+ *   - button:disabled restates its colours, never fades a filled button
+ *   - the column is centred and measured, not full-bleed
+ */
+
+:root {
+  --font-ui: ui-sans-serif, -apple-system, "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-text: ui-serif, "Iowan Old Style", "Charter", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --fs-micro: 12px; --fs-sm: 13px; --fs-body: 15px;
+  --fs-lg: 17px; --fs-title: 20px;
+  --lh-tight: 1.25; --lh-body: 1.55; --lh-verse: 1.7;
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px;
+  --s5: 24px; --s6: 32px; --s7: 40px; --s8: 64px;
+  --measure: 780px;
+
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+
+  --bg: #FCFCFD;
+  --bg-raised: #FFFFFF;
+  --bg-sunken: #F4F4F6;
+  --fg: #16161A;
+  --fg-muted: #6B6B76;
+  --fg-faint: #9A9AA5;
+  --border: #E4E4E9;
+  --border-strong: #CFCFD6;
+  --accent: #3B5BDB;
+  --accent-fg: #FFFFFF;
+  --accent-soft: #EDF0FE;
+  --ok: #2F8F5B;
+  --ok-soft: #E7F4ED;
+  --warn: #B4762A;
+  --warn-soft: #FBF1E2;
+  --danger: #C2413B;
+  --danger-soft: #FBECEB;
+
+  --shadow-sm: 0 1px 2px rgba(16,16,26,.06);
+  --shadow-md: 0 2px 8px rgba(16,16,26,.07), 0 1px 2px rgba(16,16,26,.05);
+  --ease: cubic-bezier(.2,.6,.3,1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E0E11;
+    --bg-raised: #17171B;
+    --bg-sunken: #121215;
+    --fg: #ECECEF;
+    --fg-muted: #9E9EAA;
+    --fg-faint: #6A6A76;
+    --border: #26262C;
+    --border-strong: #3A3A43;
+    --accent: #7C93F5;
+    --accent-fg: #0E0E11;
+    --accent-soft: #1B2038;
+    --ok: #57B67F;
+    --ok-soft: #14241B;
+    --warn: #D2A055;
+    --warn-soft: #251C10;
+    --danger: #E0716A;
+    --danger-soft: #2A1514;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+    --shadow-md: 0 2px 10px rgba(0,0,0,.45);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0E0E11;
+  --bg-raised: #17171B;
+  --bg-sunken: #121215;
+  --fg: #ECECEF;
+  --fg-muted: #9E9EAA;
+  --fg-faint: #6A6A76;
+  --border: #26262C;
+  --border-strong: #3A3A43;
+  --accent: #7C93F5;
+  --accent-fg: #0E0E11;
+  --accent-soft: #1B2038;
+  --ok: #57B67F;
+  --ok-soft: #14241B;
+  --warn: #D2A055;
+  --warn-soft: #251C10;
+  --danger: #E0716A;
+  --danger-soft: #2A1514;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--fs-body)/var(--lh-body) var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Indeterminate top line, shown only while a click is in flight. */
+#progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 2px;
+  background: transparent; z-index: 20; overflow: hidden;
+}
+#progress.on::after {
+  content: ""; position: absolute; inset: 0;
+  background: var(--accent);
+  animation: slide 1.4s var(--ease) infinite;
+}
+@keyframes slide {
+  0% { transform: translateX(-100%) scaleX(.4); }
+  100% { transform: translateX(100%) scaleX(.4); }
+}
+
+/* A measured, centred column — not full-bleed. */
+.wrap {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: var(--s7) var(--s4) var(--s8);
+}
+
+/* --- header rail -------------------------------------------------------- */
+.rail {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s3);
+  font-size: var(--fs-micro); color: var(--fg-muted);
+  letter-spacing: .08em; text-transform: uppercase;
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--s5);
+}
+.state { display: inline-flex; align-items: center; gap: var(--s2); }
+.dot { width: 7px; height: 7px; border-radius: var(--r-pill); background: var(--fg-faint); }
+.dot.idle { background: var(--fg-faint); }
+.dot.queued { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+.dot.working { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+#statelabel { font-variant-numeric: tabular-nums; }
+
+/* --- stage tabs --------------------------------------------------------- */
+.tabs {
+  display: flex; flex-wrap: wrap; gap: var(--s2);
+  margin-bottom: var(--s5);
+}
+.tab {
+  font: 500 var(--fs-sm)/1 var(--font-ui);
+  padding: 8px var(--s3);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.tab:hover:not(:disabled) { background: var(--bg-sunken); color: var(--fg); }
+/* Same specificity trap as the primary button: `.tab:hover:not(:disabled)`
+   is (0,3,1) and would repaint the selected tab as an unselected one the
+   moment the pointer crossed it. */
+.tab.on,
+.tab.on:hover:not(:disabled) {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}
+.tab .count { font-variant-numeric: tabular-nums; opacity: .75; margin-left: 4px; }
+.tab .qmark { color: var(--warn); margin-left: 6px; }
+
+.notice {
+  margin: 0 0 var(--s4);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  background: var(--danger-soft); color: var(--danger);
+  border: 1px solid var(--danger);
+}
+.notice.ok { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+
+.empty-stage {
+  color: var(--fg-faint); font-style: italic; font-size: var(--fs-sm);
+  padding: var(--s6) 0;
+}
+
+/* --- artifact card ------------------------------------------------------ */
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--s5);
+  margin-bottom: var(--s5);
+}
+.card.is-approved { border-left: 3px solid var(--ok); }
+.card.is-busy { border-color: var(--border-strong); }
+
+.card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--s3); margin-bottom: var(--s1);
+}
+.card-title {
+  margin: 0; font-size: var(--fs-title); font-weight: 600;
+  line-height: var(--lh-tight); letter-spacing: -.015em;
+}
+.chip-status {
+  flex: none;
+  font-size: var(--fs-micro); text-transform: uppercase; letter-spacing: .06em;
+  padding: 3px var(--s2); border-radius: var(--r-pill);
+  background: var(--bg-sunken); color: var(--fg-muted);
+  border: 1px solid var(--border);
+}
+.chip-status.st-approved { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+.chip-status.st-review { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.chip-status.st-stale { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.chip-status.st-failed { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
+.chip-status.st-generating { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+
+.card-meta {
+  font-size: var(--fs-sm); color: var(--fg-muted);
+  margin: 0 0 var(--s4);
+}
+.card-meta .sep { opacity: .5; margin: 0 6px; }
+
+/* The queued banner: the fix for "a queued click looks like a dead button".
+   It is a real line of information from the store, not a spinner. */
+.queued-note {
+  display: flex; align-items: center; gap: var(--s2);
+  font-size: var(--fs-sm);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-md);
+  background: var(--warn-soft); color: var(--warn);
+  border: 1px solid var(--warn);
+  margin-bottom: var(--s4);
+}
+.queued-note.working { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.queued-note .dot { background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+
+/* --- the content under review ------------------------------------------ */
+/* pre-wrap is load-bearing: verse and scripts arrive with real line breaks
+   and a markdown renderer collapses them into one paragraph. */
+.draft {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s4);
+  font-family: var(--font-text);
+  font-size: var(--fs-lg);
+  line-height: var(--lh-verse);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  hyphens: none;
+  transition: opacity 140ms var(--ease);
+  max-height: 540px;
+  overflow-y: auto;
+}
+/* Dimmed, never hidden: you keep reading the current draft while the next
+   one is being written. */
+.draft.dim { opacity: .55; }
+.draft.empty {
+  color: var(--fg-faint); font-style: italic;
+  font-family: var(--font-ui); font-size: var(--fs-body);
+}
+.draft.json { font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.5; }
+
+.media { margin: 0; }
+.media img, .media video {
+  max-width: 100%; border-radius: var(--r-md); border: 1px solid var(--border);
+  display: block;
+}
+.media audio { width: 100%; }
+.media-missing {
+  font-size: var(--fs-sm); color: var(--fg-muted);
+  background: var(--bg-sunken); border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md); padding: var(--s4);
+  font-family: var(--font-mono); overflow-wrap: anywhere;
+}
+
+/* --- details blocks (prompt/notes, version history) --------------------- */
+details.fold { margin-top: var(--s3); }
+details.fold summary {
+  cursor: pointer; font-size: var(--fs-sm); color: var(--fg-muted);
+  list-style: none; user-select: none; padding: var(--s2) 0;
+}
+details.fold summary::-webkit-details-marker { display: none; }
+details.fold summary::before { content: "▸ "; }
+details.fold[open] summary::before { content: "▾ "; }
+.fold-body { font-size: var(--fs-sm); color: var(--fg-muted); white-space: pre-wrap; }
+.fold-body b { color: var(--fg); font-weight: 600; }
+.fold-body p { margin: 0 0 var(--s2); }
+
+.vrow {
+  display: flex; gap: var(--s3); align-items: baseline; justify-content: space-between;
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  font-size: var(--fs-sm); color: var(--fg-muted);
+}
+.vrow:hover { background: var(--bg-sunken); }
+.vrow .vlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vrow b { color: var(--fg); font-weight: 600; }
+.vrow.current { color: var(--fg); }
+
+/* --- controls ----------------------------------------------------------- */
+.controls {
+  margin-top: var(--s4); padding-top: var(--s4);
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: var(--s3);
+}
+.row { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
+.row.stretch > input, .row.stretch > textarea { flex: 1; min-width: 200px; }
+.label {
+  font-size: var(--fs-micro); color: var(--fg-muted);
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: var(--s1);
+}
+.field { display: flex; flex-direction: column; }
+/* A schema question, not a field caption: sentence case, body size. */
+.field .label.question {
+  text-transform: none; letter-spacing: normal;
+  font-size: var(--fs-body); color: var(--fg); font-weight: 500;
+  margin-bottom: var(--s2);
+}
+.field .hint { font-size: var(--fs-micro); color: var(--fg-faint); margin-bottom: var(--s1); }
+.field .req { color: var(--warn); }
+
+button {
+  font: 500 var(--fs-sm)/1 var(--font-ui);
+  padding: 9px var(--s3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease);
+}
+button:hover:not(:disabled) { background: var(--bg-sunken); }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+/* `button:hover:not(:disabled)` above scores (0,2,1) and would otherwise beat
+   the plain `button.primary` (0,1,1) rule: hovering a filled button repainted
+   it grey while its label stayed white — invisible. The hover state has to
+   restate the fill, exactly like the disabled state below. */
+button.primary:hover:not(:disabled) {
+  background: var(--accent); color: var(--accent-fg);
+  filter: brightness(1.08);
+}
+button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+button.danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+/* Disabled restates every colour it uses. Fading a filled button with
+   opacity leaves white label text on a washed-out accent fill — unreadable,
+   and it hits every button for the whole in-flight phase. */
+button:disabled,
+button.primary:disabled,
+button.danger:disabled {
+  opacity: 1;
+  cursor: default;
+  background: var(--bg-sunken);
+  color: var(--fg-faint);
+  border-color: var(--border);
+  filter: none;
+}
+
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+input[type="text"], input[type="number"], textarea, select {
+  font: var(--fs-body)/1.45 var(--font-ui);
+  padding: 9px var(--s3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--fg);
+  width: 100%;
+}
+textarea { resize: vertical; min-height: 68px; white-space: pre-wrap; }
+input:disabled, textarea:disabled, select:disabled {
+  background: var(--bg-sunken); color: var(--fg-faint); border-color: var(--border);
+}
+label.check { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-body); }
+label.check input { width: auto; }
+
+@media (max-width: 520px) {
+  .wrap { padding: var(--s5) var(--s4) var(--s7); }
+  .card { padding: var(--s4); }
+  .card-head { flex-direction: column; align-items: flex-start; gap: var(--s1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
