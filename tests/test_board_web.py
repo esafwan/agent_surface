@@ -681,22 +681,45 @@ def test_task_board_approve_button_appears_on_all_cards(task_board_client):
     This is testing a known characteristic: action buttons are gated purely by
     stage config allowed_actions, NOT by artifact status. So Approve/Reopen
     appear on every task card regardless of its current status.
+
+    A prior version of this test asserted `"approve" in stage["artifact_type"]`
+    (a substring check against a string like "task", which is always False)
+    `or stage is not None` (always True, since `stage` was already dereferenced
+    above -- this OR made the whole assertion pass unconditionally) and
+    `non_review is not None` after a `next()` call that would have raised
+    StopIteration rather than returned None on an empty match. Neither
+    assertion could ever fail regardless of real behavior. Fixed to check
+    what the test's name and docstring actually claim.
     """
     state = task_board_client.get("/api/state").json()
     stage = state["stages"][0]
+    artifacts = stage["artifacts"]
 
-    # All tasks should have the approve and reopen actions available in their
-    # allowed_actions list from the stage config
-    for artifact in stage["artifacts"]:
-        # The UI will render these buttons regardless of status because
-        # they are in stage.allowed_actions
-        assert "approve" in stage["artifact_type"] or stage is not None  # stage allows them
-
-    # Verify at least one artifact is NOT in review status but still has these actions possible
-    non_review = next(
-        a for a in stage["artifacts"] if a["status"] != "review"
+    statuses_present = {a["status"] for a in artifacts}
+    assert len(statuses_present) > 1, (
+        "fixture must include multiple distinct statuses for this test to mean anything"
     )
-    assert non_review is not None  # We have tasks in other statuses
+
+    # Every artifact, regardless of its own status, must carry "approve" and
+    # "reopen" in its OWN allowed_actions -- this is the actual claim being
+    # tested, not the stage's artifact_type string or a tautology.
+    for artifact in artifacts:
+        assert "approve" in artifact["allowed_actions"], (
+            f"{artifact['artifact_id']} (status={artifact['status']}) "
+            f"missing 'approve' in allowed_actions"
+        )
+        assert "reopen" in artifact["allowed_actions"], (
+            f"{artifact['artifact_id']} (status={artifact['status']}) "
+            f"missing 'reopen' in allowed_actions"
+        )
+        # And confirm the read-only premise: no edit/revise/message leaks in.
+        assert "edit" not in artifact["allowed_actions"]
+        assert "revise" not in artifact["allowed_actions"]
+        assert "message" not in artifact["allowed_actions"]
+
+    non_review = next(a for a in artifacts if a["status"] != "review")
+    assert "approve" in non_review["allowed_actions"]
+    assert "reopen" in non_review["allowed_actions"]
 
 
 def test_plain_text_without_mermaid_is_passed_through():
