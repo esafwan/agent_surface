@@ -535,6 +535,89 @@ conversation.
 3. Locked descendants are flagged but not auto-regenerated
 4. User decides: regenerate downstream, or revert script, or accept stale state
 
+### Pattern 4: Agent Task Board (Read-Only Progress + Approval)
+
+When a parent agent decomposes work into sub-tasks and hands them to workers,
+the **task-board preset** (`surface/stages/task_board.json`) shows that
+decomposition live on the board as a **read-only progress column view**: tasks
+flow from "Planned" (draft) → "In Progress" (generating) → "Needs Approval"
+(review) → "Done" (approved), with separate columns for failed and cancelled
+tasks. This is the visible form of "Sub-Agent Ownership and Handoff" (see
+below): the parent agent owns the board, workers create and update task
+artifacts as they work, and the user sees real-time progress and approves
+milestones without editing individual tasks.
+
+**When to use:**
+- Long multi-step work decomposed into sub-tasks by an agent (not user-initiated)
+- You need to show live progress and approval gates
+- Tasks should never be edited directly by the user (only approved/reopened)
+
+**Key differences from the movie/pipeline preset:**
+- Movie uses **stage tabs** (each stage a tab, task artifacts flow across stages within a workflow)
+- Task board uses **status columns** (all tasks in one stage, grouped by their status)
+- Movie is for linear workflows; task board is for parallel decomposition and milestone tracking
+
+To initialize a task-board project:
+```bash
+surface --db .surface-board/state.sqlite3 init --stage task_board
+```
+
+The task-board preset restricts user actions to `approve` and `reopen` only —
+no direct editing, revising, or messaging. Task creation and status updates
+are worker-driven, exactly like any other artifact type in the board.
+
+**Known characteristic:** The approve and reopen action buttons appear on
+every task card, regardless of its current status, because the UI is gated
+by stage config `allowed_actions` rather than artifact status. A task already
+in "Done" (approved) will still show an Approve button. This is app-wide
+behavior, not specific to the task board, and simplifies the action model:
+the stage defines what's possible, the status tells the worker what happened.
+
+---
+
+## Board Rendering Features
+
+The web renderer (`--renderer web`, the default for `surface serve`) includes
+several content-aware rendering features:
+
+### Mermaid Diagram Support
+
+Any markdown or text artifact containing fenced Mermaid code blocks
+(`` ```mermaid ... ``` ``) renders them as diagrams automatically on the board.
+This is especially useful for specs, architecture diagrams, and dependency
+visuals. No server-side setup required; rendering happens client-side via
+mermaid.js.
+
+Example:
+```markdown
+# System Architecture
+
+```mermaid
+graph TD
+    A[User Request] --> B{Approved?}
+    B -->|Yes| C[Generate]
+    B -->|No| D[Return Feedback]
+```
+```
+
+### Version Diff Feature
+
+Any artifact with 2+ versions gets a "Compare to previous version" control on
+the card. Diffs are computed server-side (using Python's `difflib.unified_diff`)
+and returned as line-by-line JSON; they are never cached client-side. This ensures
+that a refresh or a second browser tab always shows a diff computed from the
+current store state.
+
+The diff endpoint is `/api/diff/<artifact_id>?from=<version_id>&to=<version_id>`.
+
+### Dependency Graph View
+
+A "Dependencies" button appears on any artifact card, showing its immediate
+upstream and downstream neighbors as a Mermaid graph. Node colors encode status:
+green (approved), amber (stale), red (failed), and a padlock for locked artifacts.
+The graph is scoped to the artifact's local neighborhood (not the entire project),
+and it refreshes live without requiring a restart of `surface serve`.
+
 ---
 
 ## Sub-Agent Ownership and Handoff
