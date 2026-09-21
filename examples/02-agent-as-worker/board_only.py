@@ -26,6 +26,7 @@ Run:
 """
 
 import json
+import sys
 from pathlib import Path
 
 from surface.board import build_board
@@ -77,6 +78,12 @@ blocks = build_board(store, stage_config)
 
 print(f"  Board: http://127.0.0.1:{PORT}  (user: surface, password: {TOKEN})")
 print(f"  Claim events against: surface --db {DB} inbox next --wait 60")
+# Stdout is fully buffered once it isn't a tty (e.g. backgrounded with `&` or
+# redirected to a log file, as the README suggests). blocks.launch() below
+# blocks forever, so without this flush the banner above would sit in the
+# buffer and never reach the log -- the process would look silent even
+# though it's serving.
+sys.stdout.flush()
 
 blocks.launch(
     server_name="127.0.0.1",
