@@ -20,6 +20,8 @@ from surface.board import (
     render_version_content,
     describe_select_version_conflict,
     BOARD_CSS,
+    render_field_label,
+    field_label_for,
     format_artifact_meta,
     format_status_badge,
     format_version_line,
@@ -1478,6 +1480,21 @@ def test_board_css_only_references_real_gradio_theme_variables():
         "--shadow-drop-lg",
         "--button-small-text-size",
         "--layout-gap",
+        # Gradio's own label/title chrome tokens (referenced in the
+        # de-pilling section and its evidence comment). All are emitted by
+        # gradio.themes.Soft()._get_theme_css() in gradio 5.50.
+        "--block-title-background-fill",
+        "--block-title-border-color",
+        "--block-title-border-width",
+        "--block-title-padding",
+        "--block-title-radius",
+        "--block-title-text-color",
+        "--block-label-background-fill",
+        "--block-label-radius",
+        "--primary-100",
+        "--primary-500",
+        "--spacing-sm",
+        "--spacing-md",
     }
     board_locals = {
         "--surface-max-width",
@@ -1501,6 +1518,81 @@ def test_board_css_styles_tab_strip_and_card_hierarchy():
         ".action-bar button",
     ):
         assert selector in BOARD_CSS, f"missing style for {selector}"
+
+
+def test_board_css_neutralises_gradio_label_pills():
+    """
+    Gradio 5.50's BlockTitle (`span.svelte-g2oxp3`, defined in the installed
+    package at templates/frontend/assets/FullscreenButton-BYduS5IX.css) paints
+    every `label=` with --block-title-background-fill / -radius / -padding,
+    which the Soft theme points at var(--primary-100) -- the lavender pill.
+    The board must zero those tokens rather than merely recolour them.
+    """
+    for decl in (
+        "--block-title-background-fill: transparent;",
+        "--block-title-border-width: 0px;",
+        "--block-title-radius: 0px;",
+        "--block-title-padding: 0px;",
+        "--block-label-background-fill: transparent;",
+        "--block-label-radius: 0px;",
+        "--block-label-shadow: none;",
+    ):
+        assert decl in BOARD_CSS, f"missing de-pilling declaration: {decl}"
+    # And the belt-and-braces override on the real Gradio class name.
+    assert "span.svelte-g2oxp3" in BOARD_CSS
+
+
+def test_board_css_styles_own_form_field_labels_and_controls():
+    """Form fields render their own label row + a bare control."""
+    for selector in (
+        ".field-block",
+        ".field-label p",
+        ".field-label .field-required",
+        ".field-label .field-hint",
+        ".field-control input[type=\"text\"]",
+        ".field-control .wrap-inner",
+    ):
+        assert selector in BOARD_CSS, f"missing style for {selector}"
+    # Inputs are flattened to a single hairline border with no inner shadow.
+    assert "--input-border-width: 1px;" in BOARD_CSS
+    assert "--input-shadow: none;" in BOARD_CSS
+
+
+def test_board_css_reserves_accent_for_primary_actions():
+    """Accent colour on the primary action and active tab only."""
+    assert ".action-bar button.primary" in BOARD_CSS
+    assert ".action-bar button.secondary" in BOARD_CSS
+    # Cards are bordered, not shadowed.
+    assert "box-shadow: none !important;" in BOARD_CSS
+    assert "var(--shadow-drop-lg)" not in BOARD_CSS
+
+
+def test_render_field_label_is_plain_text_not_a_badge():
+    assert render_field_label("What is your project name?") == (
+        "What is your project name?"
+    )
+    # No markdown emphasis, no wrapping element that could re-introduce a pill.
+    assert "<span" not in render_field_label("Simple")
+
+
+def test_render_field_label_marks_required_and_hint():
+    out = render_field_label("Genre", required=True, description="Pick one")
+    assert out.startswith("Genre")
+    assert '<span class="field-required">*</span>' in out
+    assert '<span class="field-hint">Pick one</span>' in out
+
+
+def test_render_field_label_escapes_html():
+    out = render_field_label("<script>x</script>", description="a & b")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+    assert "a &amp; b" in out
+
+
+def test_field_label_for_prefers_schema_title():
+    assert field_label_for("project_name", {"title": "Project name"}) == "Project name"
+    assert field_label_for("project_name", {}) == "Project Name"
+    assert field_label_for("project_name", {"title": "  "}) == "Project Name"
 
 
 def test_format_artifact_meta_is_single_line_with_key_fields():

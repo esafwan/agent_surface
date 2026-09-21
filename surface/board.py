@@ -6,6 +6,7 @@ Gradio-specific wiring is in separate section at end.
 """
 import json
 import hashlib
+import html
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -649,6 +650,44 @@ def build_form_answers_json(field_names: List[str], field_values: List[Any]) -> 
     return json.dumps(dict(zip(field_names, field_values)))
 
 
+def render_field_label(
+    label: str,
+    required: bool = False,
+    description: Optional[str] = None,
+) -> str:
+    """
+    Build the markup for a form field's own label row.
+
+    Gradio's native `label=` renders through its BlockTitle component
+    (`span.svelte-g2oxp3` in gradio 5.50), which the Soft theme paints as a
+    filled, rounded lavender pill -- one per field, which is what made the
+    board read as an auto-generated admin form. Form fields therefore pass
+    `show_label=False` and render this instead, as a `gr.Markdown` styled
+    entirely by BOARD_CSS's `.field-label` rules.
+
+    Pure string builder: HTML-escapes its inputs and returns markup only.
+    """
+    text = html.escape(label or "")
+    parts = [text]
+    if required:
+        parts.append('<span class="field-required">*</span>')
+    if description:
+        parts.append(
+            f'<span class="field-hint">{html.escape(description)}</span>'
+        )
+    return "".join(parts)
+
+
+def field_label_for(prop_name: str, prop_schema: Dict[str, Any]) -> str:
+    """Human label for a JSON Schema property: its `title` if present,
+    otherwise a title-cased version of the property name."""
+    if isinstance(prop_schema, dict):
+        title = prop_schema.get("title")
+        if isinstance(title, str) and title.strip():
+            return title
+    return prop_name.replace("_", " ").title()
+
+
 def describe_select_version_conflict(result: Dict[str, Any]) -> Optional[str]:
     """
     Build a user-facing conflict message for a select_version result.
@@ -695,12 +734,76 @@ BOARD_CSS = """
  *     gradio.themes.Soft()._get_theme_css() (or Gradio's own --size-* scale).
  */
 
+/* --- Visual language -------------------------------------------------
+ * One deliberate direction, in the Linear / Vercel dashboard / Radix
+ * Themes register: near-monochrome neutrals, quiet 1px borders instead of
+ * drop shadows, generous whitespace, and the accent colour spent ONLY on
+ * genuinely primary affordances (the Approve button, the active tab).
+ * Nothing is a coloured badge by default.
+ *
+ * The single worst offender in the previous design was NOT this
+ * stylesheet: it was Gradio's own BlockTitle component, which renders
+ * every `label=` as a filled, rounded pill. Verified in the installed
+ * package, gradio 5.50.0:
+ *
+ *   assets/FullscreenButton-BYduS5IX.css
+ *     span.svelte-g2oxp3 { display:inline-block; position:relative;
+ *       border: solid var(--block-title-border-width)
+ *                     var(--block-title-border-color);
+ *       border-radius: var(--block-title-radius);
+ *       background: var(--block-title-background-fill);
+ *       padding: var(--block-title-padding);
+ *       color: var(--block-title-text-color); ... }
+ *
+ * and gradio.themes.Soft() sets
+ *   --block-title-background-fill: var(--block-label-background-fill)
+ *   --block-label-background-fill: var(--primary-100)   (the lavender)
+ *   --block-title-radius: var(--block-label-radius) = var(--radius-md)
+ *   --block-title-padding: var(--spacing-sm) var(--spacing-md)
+ *   --block-title-text-color: var(--primary-500)
+ *
+ * -> lavender rounded pill, once per field. The real fix is two-part:
+ *   (1) form fields no longer pass `label=` at all (Python side); they
+ *       render their own `.field-label` markdown row instead, and
+ *   (2) the pill tokens below are neutralised, so any remaining native
+ *       label (accordions, stray components) is plain quiet text too.
+ */
+
 /* Local scale tokens, layered on top of the theme's own variables. */
 .gradio-container {
   --surface-max-width: 1600px;
   --surface-gutter: 2vw;
   --surface-radius: var(--radius-lg);
   --surface-rhythm: 12px;
+}
+
+/* (2) De-pill Gradio's own label chrome at the token level. These feed
+ * span.svelte-g2oxp3 (BlockTitle) and .block-label (BlockLabel); zeroing
+ * them turns every remaining native label into plain small grey text. */
+.gradio-container {
+  --block-title-background-fill: transparent;
+  --block-title-border-width: 0px;
+  --block-title-radius: 0px;
+  --block-title-padding: 0px;
+  --block-title-text-color: var(--body-text-color-subdued);
+  --block-title-text-weight: 500;
+  --block-title-text-size: var(--text-sm);
+  --block-label-background-fill: transparent;
+  --block-label-border-width: 0px;
+  --block-label-radius: 0px;
+  --block-label-shadow: none;
+  --block-label-text-color: var(--body-text-color-subdued);
+  --block-label-text-size: var(--text-sm);
+  --block-label-text-weight: 500;
+  /* Inputs: a single hairline border, no fill difference from the card,
+   * no inner shadow. (Soft ships --input-border-width: 0px plus a shadow,
+   * which is what made every field read as a floating white box.) */
+  --input-border-width: 1px;
+  --input-background-fill: var(--background-fill-primary);
+  --input-shadow: none;
+  --input-shadow-focus: none;
+  --input-radius: var(--radius-sm);
+  --block-shadow: none;
 }
 
 /* Width: fill a real desktop viewport instead of a phone-width column.
@@ -775,12 +878,13 @@ BOARD_CSS = """
   padding: 16px 18px 14px 18px !important;
   margin-bottom: 16px !important;
   background: var(--background-fill-primary) !important;
-  box-shadow: var(--shadow-drop);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: none !important;
+  transition: border-color 0.15s ease;
 }
+/* Quiet hover: the border darkens a step. No lift, no shadow bloom. */
 .artifact-card:hover {
   border-color: var(--border-color-accent-subdued) !important;
-  box-shadow: var(--shadow-drop-lg);
+  box-shadow: none !important;
 }
 .artifact-title p, .artifact-title h3 {
   margin: 0 0 2px 0 !important;
@@ -826,6 +930,85 @@ BOARD_CSS = """
 }
 .content-surface { margin-bottom: var(--surface-rhythm) !important; }
 
+/* --- Schema forms: our own labels, not Gradio's pills ----------------
+ * Each field is a two-row stack: a `.field-label` markdown line we own
+ * completely, then the bare control (rendered with show_label=False and
+ * container=False, so Gradio emits no BlockTitle span at all).
+ */
+.field-block {
+  margin: 0 0 14px 0 !important;
+  gap: 4px !important;
+}
+.field-label p {
+  margin: 0 !important;
+  font-size: var(--text-sm) !important;
+  font-weight: 550 !important;
+  line-height: 1.45;
+  letter-spacing: -0.003em;
+  color: var(--body-text-color) !important;
+  /* explicitly not a badge */
+  background: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+}
+.field-label .field-required {
+  color: var(--body-text-color-subdued);
+  font-weight: 500;
+  margin-left: 2px;
+}
+.field-label .field-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  font-weight: 400;
+  color: var(--body-text-color-subdued);
+}
+/* The control itself: hairline border, card-coloured fill, one focus ring.
+ * `.wrap-inner` is Dropdown's real inner container in gradio 5.50
+ * (assets/Index-B8k0osbz.css: `.wrap-inner.svelte-1scun43{...}`), so it
+ * needs the same treatment as a plain input/textarea. */
+.field-control input[type="text"],
+.field-control input[type="number"],
+.field-control textarea,
+.field-control .wrap-inner {
+  border: 1px solid var(--border-color-primary) !important;
+  border-radius: var(--radius-sm) !important;
+  background: var(--background-fill-primary) !important;
+  box-shadow: none !important;
+  font-size: var(--text-md) !important;
+  color: var(--body-text-color) !important;
+}
+.field-control input[type="text"],
+.field-control input[type="number"],
+.field-control textarea {
+  padding: 8px 10px !important;
+}
+.field-control input[type="text"]:focus,
+.field-control input[type="number"]:focus,
+.field-control textarea:focus,
+.field-control .wrap-inner:focus-within {
+  border-color: var(--color-accent) !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+/* Booleans read as one line: box then text, no surrounding card. */
+.field-control label > input[type="checkbox"] {
+  border-radius: var(--radius-sm) !important;
+}
+/* Belt and braces: if any BlockTitle span still renders inside a card,
+ * it must not look like a badge. (span.svelte-g2oxp3, see header note.) */
+.artifact-card span.svelte-g2oxp3,
+.artifact-card .block-title {
+  background: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  color: var(--body-text-color-subdued) !important;
+  font-size: var(--text-sm) !important;
+  font-weight: 500 !important;
+}
+
 /* Accordions (prompt/notes, version history) read as secondary detail. */
 .artifact-card .label-wrap {
   font-size: var(--text-sm) !important;
@@ -857,9 +1040,26 @@ BOARD_CSS = """
 }
 .action-bar button {
   min-height: 34px !important;
-  border-radius: var(--radius-md) !important;
+  border-radius: var(--radius-sm) !important;
   font-size: var(--button-small-text-size) !important;
-  font-weight: 600 !important;
+  font-weight: 550 !important;
+  box-shadow: none !important;
+}
+/* Secondary actions are monochrome outlines; only the primary action
+ * (Approve, Submit form) is allowed to carry the accent colour. */
+.action-bar button.secondary {
+  background: var(--background-fill-primary) !important;
+  border: 1px solid var(--border-color-primary) !important;
+  color: var(--body-text-color) !important;
+}
+.action-bar button.secondary:hover {
+  border-color: var(--border-color-accent-subdued) !important;
+  background: var(--background-fill-secondary) !important;
+}
+.action-bar button.primary {
+  background: var(--color-accent) !important;
+  border: 1px solid var(--color-accent) !important;
+  color: white !important;
 }
 
 .subtle-note p {
@@ -1131,50 +1331,77 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                                     answers = parse_form_answers(content_value)
                                     field_components: List[Any] = []
                                     field_names: List[str] = []
+                                    required_names = set(
+                                        form_schema.get("required", [])
+                                        if isinstance(form_schema, dict)
+                                        else []
+                                    )
                                     for prop_name, prop_schema in form_properties:
-                                        label = prop_schema.get(
-                                            "title", prop_name.replace("_", " ").title()
-                                        )
+                                        label = field_label_for(prop_name, prop_schema)
                                         current = answers.get(
                                             prop_name, prop_schema.get("default", "")
                                         )
                                         enum_choices = prop_schema.get("enum")
                                         prop_type = prop_schema.get("type", "string")
-                                        if enum_choices:
-                                            field = gr.Dropdown(
-                                                choices=[str(c) for c in enum_choices],
-                                                value=(
-                                                    str(current)
-                                                    if current not in (None, "")
-                                                    else None
+                                        # Own label row + bare control: no
+                                        # Gradio BlockTitle pill anywhere.
+                                        with gr.Column(elem_classes=["field-block"]):
+                                            gr.Markdown(
+                                                render_field_label(
+                                                    label,
+                                                    required=prop_name in required_names,
+                                                    description=prop_schema.get(
+                                                        "description"
+                                                    ),
                                                 ),
-                                                label=label,
+                                                elem_classes=["field-label"],
                                             )
-                                        elif prop_type in ("integer", "number"):
-                                            field = gr.Number(
-                                                value=current
-                                                if isinstance(current, (int, float))
-                                                else None,
-                                                label=label,
-                                            )
-                                        elif prop_type == "boolean":
-                                            field = gr.Checkbox(
-                                                value=bool(current), label=label
-                                            )
-                                        else:
-                                            field = gr.Textbox(
-                                                value=str(current) if current is not None else "",
-                                                label=label,
-                                                lines=1,
-                                            )
+                                            if enum_choices:
+                                                field = gr.Dropdown(
+                                                    choices=[str(c) for c in enum_choices],
+                                                    value=(
+                                                        str(current)
+                                                        if current not in (None, "")
+                                                        else None
+                                                    ),
+                                                    show_label=False,
+                                                    container=False,
+                                                    elem_classes=["field-control"],
+                                                )
+                                            elif prop_type in ("integer", "number"):
+                                                field = gr.Number(
+                                                    value=current
+                                                    if isinstance(current, (int, float))
+                                                    else None,
+                                                    show_label=False,
+                                                    container=False,
+                                                    elem_classes=["field-control"],
+                                                )
+                                            elif prop_type == "boolean":
+                                                field = gr.Checkbox(
+                                                    value=bool(current),
+                                                    label=label,
+                                                    show_label=False,
+                                                    container=False,
+                                                    elem_classes=["field-control"],
+                                                )
+                                            else:
+                                                field = gr.Textbox(
+                                                    value=str(current) if current is not None else "",
+                                                    show_label=False,
+                                                    container=False,
+                                                    lines=1,
+                                                    elem_classes=["field-control"],
+                                                )
                                         field_components.append(field)
                                         field_names.append(prop_name)
 
                                     if "edit" in artifact_card.allowed_actions:
-                                        btn_submit_form = gr.Button(
-                                            "Submit form", variant="primary", size="sm",
-                                            scale=0, min_width=120,
-                                        )
+                                        with gr.Row(elem_classes=["action-bar"]):
+                                            btn_submit_form = gr.Button(
+                                                "Submit form", variant="primary", size="sm",
+                                                scale=0, min_width=120,
+                                            )
 
                                         def handle_form_submit(
                                             artifact_id, *values, _names=field_names
@@ -1306,6 +1533,7 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                                         show_label=False,
                                         container=False,
                                         placeholder="Replace content…",
+                                        elem_classes=["field-control"],
                                         lines=2,
                                         scale=5,
                                     )
@@ -1325,6 +1553,7 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                                         show_label=False,
                                         container=False,
                                         placeholder="Revision note for the worker…",
+                                        elem_classes=["field-control"],
                                         lines=1,
                                         scale=5,
                                     )
@@ -1399,6 +1628,7 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                 show_label=False,
                 container=False,
                 placeholder="Message the worker…",
+                elem_classes=["field-control"],
                 lines=1,
                 scale=6,
             )
