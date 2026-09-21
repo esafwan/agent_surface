@@ -22,6 +22,10 @@ dist/
 # Browser testing artifacts
 .playwright-mcp/
 
+# Agent worktrees (created by the Agent tool's isolation:"worktree" option;
+# never a place code should land in a real commit)
+.claude/worktrees/
+
 # Example runtime artifacts (each example writes its own store/logs when run)
 examples/**/*.log
 examples/**/interactions/
