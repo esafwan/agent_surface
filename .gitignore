@@ -21,3 +21,8 @@ dist/
 
 # Browser testing artifacts
 .playwright-mcp/
+
+# Demo runtime artifacts
+demo/**/*.log
+demo/**/interactions/
+demo/satellite/turn.json

@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "id": "poem",
+  "title": "Poem",
+  "stages": [
+    {
+      "id": "poem",
+      "artifact_type": "text",
+      "allowed_actions": ["revise", "approve", "reopen", "select_version"],
+      "approval_required": true
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["poem"]
+  }
+}

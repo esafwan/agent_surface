@@ -28,8 +28,11 @@ Keep in chat when:
 ### Initialize a Project
 
 ```bash
-surface init --stage movie [--db <path>]
+surface [--db <path>] init --stage movie
 ```
+
+`--db` is a **global** flag and must come before the subcommand. `surface init
+--stage movie --db ./x.sqlite3` exits 2 with "unrecognized arguments".
 
 This creates a `.surface-board/` directory with:
 - `state.sqlite3` — persistent SQLite store (WAL mode)
@@ -42,7 +45,7 @@ This creates a `.surface-board/` directory with:
 ### Start the Board
 
 ```bash
-surface serve [--stage movie] [--db <path>]
+surface [--db <path>] serve [--stage movie]
 ```
 
 This launches:
@@ -51,7 +54,12 @@ This launches:
 3. **Poller** — polls generation jobs and emits completions
 4. **Board** — Gradio UI (if installed; logs if unavailable)
 
-By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board (if gradio is installed) launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`) with an auto-generated bearer token written to `.surface-board/run/token`; pass `--no-board` to run supervisor+poller only.
+By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board (if gradio is installed) launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`) with an auto-generated token written to `<db dir>/run/token`; pass `--no-board` to run supervisor+poller only.
+
+The token is the password for HTTP **basic auth**, not a bearer token: log in
+with username `surface` and the token as the password. Note the token lives
+beside the **db**, so with `--db demo/x/state.sqlite3` it is at
+`demo/x/run/token`, not `.surface-board/run/token`.
 
 ### Check Project Status
 
@@ -63,11 +71,52 @@ Reports: DB exists, artifact count, counts by stage.
 
 ---
 
+## The Shipped Worker Does Not Generate
+
+`surface serve` starts a supervisor that dispatches every inbox event to the
+reference worker (`python -m surface.worker`), which is **deterministic and
+contains no model**. On `revise` it re-commits the previous content unchanged
+(`surface/worker.py`, `content=content,  # Could be enhanced by worker
+reasoning`). The only generation path shipped is the job/provider route, and
+`surface/providers/` holds **mock** image and video only -- there is no text
+or LLM provider.
+
+So out of the box, "user asks for a poem -> board shows a poem" does not
+happen. Nothing writes new content. To put a real agent in the loop:
+
+1. **Custom worker subprocess** -- any program speaking the JSON-lines
+   protocol on stdin/stdout. `serve(worker_command=[...])` accepts one, but
+   there is **no `--worker-command` CLI flag**, so this is Python-API only.
+2. **Be the worker yourself** -- claim events with `surface inbox next`,
+   write versions, `surface inbox ack`. Requires the board running *without*
+   the supervisor, which also has no CLI flag (`--no-board` is the inverse);
+   call `build_board()` directly. See `demo/poem/board_only.py`.
+
+**Whichever you choose, a worker must be listening.** An event with no worker
+sits `pending` indefinitely and the board shows nothing -- see the warning
+under Board UI Best Practices.
+
+---
+
 ## Using the Store: No Direct Database Access
 
 **Never write to the SQLite database directly.** Always use store CLI tools; they enforce invariants (versioning, idempotency, DAG cycles, lease expiry).
 
 ### Create/Manage Artifacts
+
+**There is no `surface store create`.** The CLI can only act on artifacts that
+already exist; creating one requires the Python API:
+
+```python
+from surface.store import Store
+Store("demo/x/state.sqlite3").create_artifact(
+    id="poem_1", stage="poem", title="Poem", status="draft"
+)
+```
+
+An artifact with no selected version renders as an empty card, and a stage's
+`form_schema` fields only render once a selected version holds text content --
+so seed a first version immediately after creating the artifact.
 
 ```bash
 # Get an artifact
@@ -318,6 +367,71 @@ The board shows:
 - Message (free-form)
 - Cancel (job cancellation request)
 
+### Queued Actions Are Invisible
+
+**The board has no "queued" or "worker running" state.** An action in the
+right-hand list above enqueues an event and returns; if no worker claims it,
+the card is byte-for-byte identical to before the click. The header still
+reads "Ready", pending-event count is not shown, and no button disables. A
+queued action and a dead button look the same.
+
+Consequences when driving the board:
+
+- Start a worker **before** handing the board to a user, and keep it claiming.
+  A lapsed `surface inbox next` poll means clicks silently pile up.
+- Verify effects in the **UI**, not just the store. A version committed in
+  SQLite proves nothing about what the user can see.
+- The bottom "Message the worker…" box emits a `message` event with
+  `artifact_id: null`, unbound to any artifact and not gated by
+  `allowed_actions`. It looks like the primary input but cannot reach the
+  artifact the user is looking at -- prefer the per-card revise box.
+
+Live refresh itself does work: a `gr.Timer(2)` rebuilds the card tree from a
+fresh store read, so an external write reaches an un-reloaded tab in ~2s.
+
+### Match Stage Shape to the Work
+
+Stages render as **tabs**. That fits a pipeline (script -> shots -> clips),
+where the user moves through stages. It fits a conversation badly: one
+question per stage produces N tabs of near-identical Submit/Approve pairs
+with no sense of sequence. For question-and-answer work, prefer **one stage,
+one artifact**, revised in place -- the version history is the transcript.
+
+For a genuinely conversational loop, consider the synchronous alternative
+below instead of the board.
+
+---
+
+## Synchronous Alternative: Agent-Rendered UI
+
+The board decouples UI from agent through a durable queue, which is right for
+long pipelines and wrong for a back-and-forth exchange: the delay between a
+click and any visible change is unbounded and unshown.
+
+For turn-taking work (ask -> answer -> refine -> approve), invert it: make
+the agent's **structured response define the UI**, and call it synchronously
+so "working" is always on screen.
+
+```
+agent -> {"draft": <current text|null>,
+          "ask":   <what to ask the user next>,
+          "actions": ["approve","revise"],
+          "done":  false}
+      -> renderer draws exactly that
+user  -> "sadder, and about hands"
+      -> agent called again with history ... loop
+```
+
+`surface render` / `wait` / `answer` is this API: `render` persists a stage
+config + data as a durable handle, `wait` polls it bounded, `answer` closes
+the round-trip. It ships with **no renderer**, so pair it with a thin UI.
+`demo/satellite/loop.py` is a ~150-line working reference (Gradio + a
+`claude -p` subprocess as the agent) that records every turn through
+`render`/`answer`, giving a durable transcript without the queue.
+
+Use the board for versioned, reviewable, long-lived artifacts. Use this for
+conversation.
+
 ---
 
 ## Preferred Patterns
@@ -442,6 +556,17 @@ When delegating to a sub-agent:
 - A verified ACP integration (see above)
 - Budget confirmation UI (deterministic backend only)
 - Robust error recovery (basic retry on lease expiry)
+- **A worker that generates anything** -- the reference worker has no model,
+  and no text/LLM provider ships (see "The Shipped Worker Does Not Generate")
+- **`--worker-command` CLI flag** -- a custom worker subprocess can only be
+  supplied via `serve(worker_command=[...])` in Python
+- **A board-without-supervisor mode** -- needed for agent-as-worker; call
+  `build_board()` directly (`demo/poem/board_only.py`)
+- **`surface store create`** -- artifacts can only be created via the Python API
+- **Any queued/working indicator in the board** -- a pending event is
+  indistinguishable from a dead button (see "Queued Actions Are Invisible")
+- **A renderer for `render`/`wait`/`answer`** -- the handle API exists with
+  nothing drawing it (`demo/satellite/loop.py` is a reference implementation)
 
 ---
 
@@ -470,9 +595,9 @@ All commands output JSON to stdout; errors to stderr.
 
 ### Project
 - `surface project summary` — counts by stage & status
-- `surface init [--stage S] [--db PATH]` — initialize project
+- `surface [--db PATH] init [--stage S]` — initialize project
 - `surface status` — DB existence & artifact count
-- `surface serve [--stage S] [--db PATH] [--supervisor-iterations N]` — start runtime
+- `surface [--db PATH] serve [--stage S] [--max-iterations N]` — start runtime
 
 ---
 
@@ -482,10 +607,10 @@ All commands output JSON to stdout; errors to stderr.
 
 ```bash
 # Init
-surface init --stage document_review --db ./review.sqlite3
+surface --db ./review.sqlite3 init --stage document_review
 
 # Start board (in background or tmux)
-surface serve --db ./review.sqlite3 &
+surface --db ./review.sqlite3 serve &
 
 # Create a document artifact (via worker or CLI)
 # In a separate terminal, worker claims and processes events:
@@ -503,8 +628,8 @@ done
 
 ```bash
 # Parent agent delegates to sub-agent
-surface init --stage movie --db ./film.sqlite3
-surface serve --db ./film.sqlite3 --supervisor-iterations 5
+surface --db ./film.sqlite3 init --stage movie
+surface --db ./film.sqlite3 serve --max-iterations 5
 
 # Worker:
 # 1. Claims revise event on keyframes
