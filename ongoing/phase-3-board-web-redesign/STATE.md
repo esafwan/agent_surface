@@ -55,7 +55,60 @@ User explicitly chose "full redesign, same as 04" over targeted patches or
 leaving it, understanding the stated cost: this touches tested core code
 every stage config depends on.
 
-## In progress — DO NOT TRUST THIS SECTION AS A COMPLETION REPORT
+## Update: build agent stalled, but left real, substantial work
+
+The build sub-agent hit a 600s stream-watchdog timeout and never delivered
+its own completion report — it stalled mid-sentence ("Let me update the
+docs to match what actually runs now"), i.e. partway through its own
+documentation pass, after the implementation was already functionally
+working. Nothing was lost: the worktree persisted with the diff intact.
+
+**I independently verified, myself, before handing this to review** (not
+trusting the stalled agent's unfinished claims):
+
+- `python3 -m pytest -q` in the worktree: **503 passed, 3 skipped** (main is
+  477 passed — 26 new tests in `tests/test_board_web.py`).
+- The actual fix this phase exists for, live, in a real rendered browser:
+  ran `surface/board_web.py`'s `create_app()` standalone (no supervisor, so
+  an enqueued event could never be claimed), and confirmed the header reads
+  **"1 QUEUED"** (not a static "Ready") and the artifact card shows **"1
+  queued action — queued 13s ago, waiting for a worker."** First attempt
+  gave a false-negative blank page — I'd embedded `user:pass@host` in the
+  navigation URL for convenience, which breaks every same-origin `fetch()`
+  the page makes per the Fetch spec (relative-URL resolution inherits the
+  embedded userinfo, which the spec then forbids on the request). Not a
+  product bug — `board.js` correctly relies on native browser credential
+  caching, no header logic of its own to blame. Retested with a real
+  Playwright context (`httpCredentials`, not URL-embedded) and it rendered
+  correctly. Screenshot: `verify-queued-guaranteed.png` (repo root,
+  untracked, evidence for the review pass, not meant to be committed).
+- `--renderer web` is now the DEFAULT for `surface serve`; `--renderer
+  gradio` kept as an explicit fallback — a real decision made and
+  documented, not left ambiguous.
+- The `SKILL.md` diff I read (the "Queued Actions Are Visible (web
+  renderer) / Invisible (gradio renderer)" section and others) is coherent
+  and well-cross-referenced, not garbled by the stall.
+
+**Not yet verified by anyone**: multi-stage/multi-artifact behavior against
+`movie.json`, image/video artifact rendering, whether `--renderer gradio`
+still genuinely works end-to-end post-diff (not just reads correctly),
+auth timing-safety, whether the message-box fix is server-enforced or just
+client-side, test quality (26 tests existing isn't the same as 26 tests
+meaningfully asserting behavior), and whether `SKILL.md`'s doc pass has any
+inconsistency in the parts I didn't personally read. **This is exactly what
+the adversarial review below is for — do not treat my spot-checks above as
+a substitute for it.**
+
+## Adversarial review — in progress
+
+A second Opus sub-agent is reviewing the worktree diff against the checklist
+above (auth, query correctness w/ lease expiry, multi-stage, message-box
+server-side enforcement, action correctness via real clicks, test quality,
+`--renderer gradio` regression check, and the rest of `SKILL.md`'s diff),
+told explicitly to run things and click through flows, not just read code.
+Review only — it will not modify the worktree or touch `main`.
+
+## In progress before that — DO NOT TRUST THIS SECTION AS A COMPLETION REPORT
 
 A background sub-agent (Opus, isolated git worktree, NOT yet reviewed or
 merged) is building `surface/board_web.py` — a FastAPI renderer reusing
