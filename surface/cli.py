@@ -569,6 +569,65 @@ class SurfaceCLI:
             kwargs["media_dir"] = str(Path(self.db_path).resolve().parent / "media")
         return build_board(store, stage_config, **kwargs)
 
+    def _build_board_app(self, store: Store, stage_config: StageConfig,
+                         token: str) -> Any:
+        """Build the FastAPI web board (the default renderer)."""
+        from surface.board_web import create_app
+
+        return create_app(
+            store,
+            stage_config,
+            media_dir=str(Path(self.db_path).resolve().parent / "media"),
+            token=token,
+        )
+
+    def _launch_web_board(self, stage_config: StageConfig, host: str, port: int,
+                          token: str, run_dir: Path) -> bool:
+        """Launch the hand-written FastAPI board in a daemon thread.
+
+        This is the default renderer: the Gradio board's header could not
+        distinguish "nothing to do" from "your click is sitting unclaimed in
+        the inbox", and its component model made that (and the rest of the
+        layout) impractical to fix in place. `--renderer gradio` still
+        selects the old path.
+
+        Returns True if a board was launched, False if it is unavailable
+        (e.g. FastAPI/uvicorn not installed), in which case serve() keeps
+        running the supervisor + poller headless.
+        """
+        try:
+            board_store = Store(self.db_path)
+            app = self._build_board_app(board_store, stage_config, token)
+        except ImportError as e:
+            logger.warning(f"Web board unavailable (missing dependency): {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Web board unavailable: {e}")
+            return False
+
+        if app is None:
+            logger.warning("Web board unavailable; running supervisor + poller only")
+            return False
+
+        def _run() -> None:
+            try:
+                import uvicorn
+
+                # SPEC section 36: bind loopback by default; every route is
+                # behind HTTP basic auth with the per-run runtime token.
+                uvicorn.run(app, host=host, port=port, log_level="warning")
+            except Exception as e:  # pragma: no cover - depends on uvicorn
+                logger.error(f"Board failed to launch: {e}")
+
+        thread = threading.Thread(target=_run, name="surface-board", daemon=True)
+        thread.start()
+        self._board_thread = thread
+        self._write_runtime_file(run_dir, "board.pid", str(os.getpid()))
+        logger.info(
+            f"Board listening on http://{host}:{port} (basic auth user 'surface')"
+        )
+        return True
+
     def _launch_board(self, stage_config: StageConfig, host: str, port: int,
                       token: str, run_dir: Path) -> bool:
         """Launch the Gradio board in a daemon thread.
@@ -632,12 +691,15 @@ class SurfaceCLI:
               keep_runtime_files: bool = False,
               pool_size: int = 1,
               recycle_after_events: Optional[int] = None,
-              recycle_after_tokens: Optional[int] = None) -> None:
+              recycle_after_tokens: Optional[int] = None,
+              renderer: str = "web") -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
         Architecture (single process):
-          * the Gradio board runs in a daemon thread with its own Store
-            connection and HTTP basic auth bound to loopback;
+          * the board runs in a daemon thread with its own Store connection
+            and HTTP basic auth bound to loopback. `renderer="web"` (the
+            default) serves surface.board_web's FastAPI app;
+            `renderer="gradio"` serves the legacy surface.board Blocks;
           * the supervisor + poller cycle runs on the main thread;
           * the worker runs as a real subprocess spawned by
             NativeStreamTransport (`python -m surface.worker --db <path>`).
@@ -751,7 +813,12 @@ class SurfaceCLI:
             # Board (daemon thread, own store connection)
             # -----------------------------------------------------------------
             if board:
-                board_launched = self._launch_board(
+                launch = (
+                    self._launch_board
+                    if renderer == "gradio"
+                    else self._launch_web_board
+                )
+                board_launched = launch(
                     stage_config, host, resolved_port, token, run_dir
                 )
             else:
@@ -1407,6 +1474,11 @@ def main():
         help="Run supervisor + poller only; do not launch the board UI",
     )
     serve_parser.add_argument(
+        "--renderer", choices=("web", "gradio"), default="web",
+        help="Board renderer: 'web' (default, FastAPI + hand-written UI) or "
+             "'gradio' (the legacy Blocks board)",
+    )
+    serve_parser.add_argument(
         "--poll-interval", type=float, default=0.5,
         help="Seconds to sleep between unbounded loop iterations (default: 0.5)",
     )
@@ -1568,6 +1640,7 @@ def main():
             pool_size=args.pool_size,
             recycle_after_events=args.recycle_after_events,
             recycle_after_tokens=args.recycle_after_tokens,
+            renderer=args.renderer,
         )
 
     elif args.command == "stop":

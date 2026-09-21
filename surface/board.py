@@ -9,7 +9,7 @@ import hashlib
 import html
 from typing import Any, Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from surface.store import Store
 from surface.stages.config import StageConfig, ActionPermissionError
@@ -64,6 +64,24 @@ class ArtifactDisplayCard:
     has_generating_job: bool = False
     stale_reason: Optional[str] = None
     updated_at: str = ""
+    # --- Unresolved inbox work referencing THIS artifact -------------------
+    # The click already landed in the store; nothing visible has changed yet.
+    # `pending_event_count` is waiting for a worker to claim it,
+    # `processing_event_count` is claimed and mid-turn. Without these two a
+    # queued click is indistinguishable from a dead button (SKILL.md,
+    # "Queued Actions Are Invisible").
+    pending_event_count: int = 0
+    processing_event_count: int = 0
+    queued_event_types: List[str] = field(default_factory=list)
+    oldest_queued_at: Optional[str] = None
+    # When processing_event_count > 0, when the earliest still-processing
+    # event was actually claimed -- distinct from oldest_queued_at (its
+    # created_at), which is when it first landed in the inbox.
+    oldest_claimed_at: Optional[str] = None
+
+    @property
+    def active_event_count(self) -> int:
+        return self.pending_event_count + self.processing_event_count
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -79,6 +97,11 @@ class ArtifactDisplayCard:
             "has_generating_job": self.has_generating_job,
             "stale_reason": self.stale_reason,
             "updated_at": self.updated_at,
+            "pending_event_count": self.pending_event_count,
+            "processing_event_count": self.processing_event_count,
+            "queued_event_types": list(self.queued_event_types),
+            "oldest_queued_at": self.oldest_queued_at,
+            "oldest_claimed_at": self.oldest_claimed_at,
         }
 
 
@@ -116,6 +139,15 @@ class BoardDisplayModel:
     failed_artifacts: Set[str] = field(default_factory=set)
     locked_artifacts: Set[str] = field(default_factory=set)
     status_message: str = "Ready"
+    # Project-wide inbox pressure. `total_pending_events` (above) counts only
+    # status='pending'; these two split the full unresolved set so the header
+    # can say "2 queued · 1 working" instead of a static "Ready".
+    processing_event_count: int = 0
+    queued_artifact_ids: Set[str] = field(default_factory=set)
+
+    @property
+    def active_event_count(self) -> int:
+        return self.total_pending_events + self.processing_event_count
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -127,6 +159,8 @@ class BoardDisplayModel:
             "failed_artifacts": list(self.failed_artifacts),
             "locked_artifacts": list(self.locked_artifacts),
             "status_message": self.status_message,
+            "processing_event_count": self.processing_event_count,
+            "queued_artifact_ids": list(self.queued_artifact_ids),
         }
 
 
@@ -136,13 +170,32 @@ class DisplayModelBuilder:
     def __init__(self, store: Store, stage_config: StageConfig):
         self.store = store
         self.stage_config = stage_config
+        # Refreshed at the top of every build_board_display(); None means
+        # "not batched yet", so a card built in isolation still queries.
+        self._active_events_by_artifact: Optional[
+            Dict[Optional[str], List[Dict[str, Any]]]
+        ] = None
 
     def build_board_display(self) -> BoardDisplayModel:
         """Build complete board display model."""
+        # A dead worker's lease outlives it: without reclaiming here, a
+        # board running without a supervisor (examples/02-agent-as-worker)
+        # would show "worker is on it" forever for an event whose worker
+        # already crashed. claim_next_event() does this same reclaim as its
+        # first step when a supervisor IS running; this is the read-path
+        # equivalent for when one is not.
+        self.store.reclaim_expired_leases()
+
         display_model = BoardDisplayModel()
 
         # Count pending events using store method
         display_model.total_pending_events = self._count_pending_events()
+
+        # One pass over the unresolved inbox, bucketed by artifact, so each
+        # card can be told about its own queued work without N+1 queries.
+        self._active_events_by_artifact = self._load_active_events_by_artifact()
+        active_counts = self.store.count_active_events()
+        display_model.processing_event_count = active_counts["processing"]
 
         # Collect all artifacts by stage
         for stage_id in self.stage_config.stage_order:
@@ -162,8 +215,18 @@ class DisplayModelBuilder:
                     display_model.failed_artifacts.add(artifact_card.artifact_id)
                 if artifact_card.locked:
                     display_model.locked_artifacts.add(artifact_card.artifact_id)
+                if artifact_card.active_event_count:
+                    display_model.queued_artifact_ids.add(artifact_card.artifact_id)
 
+        display_model.status_message = format_board_status(display_model)
         return display_model
+
+    def _load_active_events_by_artifact(self) -> Dict[Optional[str], List[Dict[str, Any]]]:
+        """Group every unresolved inbox event by the artifact it references."""
+        grouped: Dict[Optional[str], List[Dict[str, Any]]] = {}
+        for event in self.store.list_active_events():
+            grouped.setdefault(event.get("artifact_id"), []).append(event)
+        return grouped
 
     def _build_stage_group(self, stage_id: str, stage_obj: Any) -> StageDisplayGroup:
         """Build display group for a single stage."""
@@ -245,6 +308,26 @@ class DisplayModelBuilder:
         # Check for generating jobs
         has_generating_job = self._has_generating_jobs(artifact_id)
 
+        # Unresolved inbox work for this artifact. Batched by
+        # build_board_display(); falls back to a direct store query when a
+        # card is built in isolation.
+        if self._active_events_by_artifact is not None:
+            active_events = self._active_events_by_artifact.get(artifact_id, [])
+        else:
+            active_events = self.store.list_active_events(artifact_id)
+
+        pending_events = [e for e in active_events if e.get("status") == "pending"]
+        processing_events = [
+            e for e in active_events if e.get("status") == "processing"
+        ]
+        # list_active_events() returns oldest first, so [0] is the longest wait.
+        oldest_queued_at = (
+            active_events[0].get("created_at") if active_events else None
+        )
+        oldest_claimed_at = (
+            processing_events[0].get("claimed_at") if processing_events else None
+        )
+
         card = ArtifactDisplayCard(
             artifact_id=artifact_id,
             stage=artifact["stage"],
@@ -257,6 +340,11 @@ class DisplayModelBuilder:
             approval_required=stage_obj.approval_required,
             has_generating_job=has_generating_job,
             updated_at=artifact.get("updated_at", ""),
+            pending_event_count=len(pending_events),
+            processing_event_count=len(processing_events),
+            queued_event_types=[str(e.get("type")) for e in active_events],
+            oldest_queued_at=oldest_queued_at,
+            oldest_claimed_at=oldest_claimed_at,
         )
 
         return card
@@ -1112,6 +1200,99 @@ def format_artifact_meta(card: ArtifactDisplayCard) -> str:
     return " &nbsp;·&nbsp; ".join(parts)
 
 
+def format_board_status(display: "BoardDisplayModel") -> str:
+    """The header's status line, told honestly.
+
+    The old board printed a static "Ready" whether the inbox was empty or
+    held a dozen unclaimed clicks, which is precisely why a queued action was
+    indistinguishable from a dead button. This reports what the store
+    actually holds:
+
+      * nothing unresolved            -> "Ready"
+      * claimed and mid-turn          -> "1 working"
+      * accepted, nobody claimed it   -> "2 queued"
+      * both                          -> "2 queued · 1 working"
+    """
+    parts = []
+    if display.total_pending_events:
+        parts.append(f"{display.total_pending_events} queued")
+    if display.processing_event_count:
+        parts.append(f"{display.processing_event_count} working")
+    if not parts:
+        return "Ready"
+    return " · ".join(parts)
+
+
+def parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """Parse a store timestamp into an aware datetime, or None.
+
+    The store writes two shapes: ISO-8601 with an offset (`_now_iso()`) and
+    SQLite's own `CURRENT_TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`, UTC, no zone).
+    Both appear on the events table depending on which write path created the
+    row, so both must parse or a queued badge silently loses its age.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def format_age(seconds: Optional[float]) -> str:
+    """Compact age string: `4s`, `3m`, `2h`, `5d`."""
+    if seconds is None or seconds < 0:
+        return ""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def format_queued_note(
+    card: ArtifactDisplayCard, now: Optional[datetime] = None
+) -> Optional[str]:
+    """The per-card in-flight line, or None when the card has no queued work.
+
+    Distinguishes the two states that matter to the user: a worker has the
+    event and is writing, versus nothing has claimed it yet (which is the
+    state that used to look like a broken button).
+    """
+    if not card.active_event_count:
+        return None
+
+    now = now or datetime.now(timezone.utc)
+
+    if card.processing_event_count:
+        claimed = parse_iso_timestamp(card.oldest_claimed_at)
+        age = format_age((now - claimed).total_seconds()) if claimed else ""
+        label = (
+            f"{card.processing_event_count} working"
+            if card.processing_event_count > 1
+            else "worker is on it"
+        )
+        return f"{label}{f' — started {age} ago' if age else ''}"
+
+    queued = parse_iso_timestamp(card.oldest_queued_at)
+    age = format_age((now - queued).total_seconds()) if queued else ""
+    count = card.pending_event_count
+    noun = "action" if count == 1 else "actions"
+    prefix = f"{count} queued {noun}"
+    if age:
+        prefix += f" — queued {age} ago"
+    return f"{prefix}, waiting for a worker"
+
+
 def format_version_line(version: VersionDisplayRow) -> str:
     """Build the compact one-line description of a version in the history list."""
     marker = "●" if version.is_selected else "○"
@@ -1147,6 +1328,7 @@ def board_state_fingerprint(display: "BoardDisplayModel", nonce: int = 0) -> str
         "stale_artifacts",
         "failed_artifacts",
         "locked_artifacts",
+        "queued_artifact_ids",
     ):
         value = data.get(key)
         if isinstance(value, list):

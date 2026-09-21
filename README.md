@@ -36,10 +36,12 @@ driven form rendering for `form`-typed artifacts (native text/dropdown/number/ch
 controls instead of a raw JSON blob), and a desktop-width layout with Gradio's own
 pill-badge label styling removed in favor of a plain, restrained design language.
 
-**Gradio version pin:** use gradio `>=4.0,<6` (`pip install -e ".[board]"` already pins
-this). Gradio 6's frontend (a Svelte 5 rewrite) throws a `effect_orphan` error and renders
-a blank page with this board as of gradio 6.28 — confirmed by live testing, not a
-theoretical incompatibility. Gradio 5.50 renders correctly.
+**Board renderer:** `surface serve` defaults to `--renderer web` — a FastAPI + hand-written HTML/CSS/JS board (`surface/board_web.py`) needing only `pip install -e ".[board]"`
+(FastAPI + uvicorn, no gradio). `--renderer gradio` selects the legacy Gradio board, which
+needs the separate `pip install -e ".[gradio]"` extra and gradio `>=4.0,<6` specifically —
+Gradio 6's frontend (a Svelte 5 rewrite) throws an `effect_orphan` error and renders a
+blank page with this board as of gradio 6.28, confirmed by live testing. Gradio 5.50
+renders correctly.
 
 ## Quickstart
 
@@ -47,11 +49,12 @@ Requires Python 3.10+.
 
 ```bash
 pip install -e .              # installs the `surface` command
-pip install -e ".[board]"     # also installs gradio, for the board UI
+pip install -e ".[board]"     # FastAPI + uvicorn, for the default web board
+pip install -e ".[gradio]"    # only if you want --renderer gradio, the legacy board
 
 # --db is a global flag; it comes BEFORE the subcommand.
-# Initialize a new project using the built-in "movie" stage preset
-surface --db .surface-board/state.sqlite3 init --stage movie
+# Initialize a new project using the built-in "poem" stage preset
+surface --db .surface-board/state.sqlite3 init --stage poem
 
 # Inspect the store directly
 surface --db .surface-board/state.sqlite3 store list
@@ -63,9 +66,11 @@ surface --db .surface-board/state.sqlite3 serve
 surface --db .surface-board/state.sqlite3 serve --no-board --max-iterations 5
 ```
 
-`serve` runs until Ctrl-C by default. If gradio is installed, it launches the board on
-`127.0.0.1` with a random per-run auth token written to `.surface-board/run/token`
-(0600 permissions) — never a fixed/guessable credential.
+`serve` runs until Ctrl-C by default. It launches the board (the web renderer by
+default; `--renderer gradio` for the legacy one) on `127.0.0.1` with a random per-run
+auth token written to `.surface-board/run/token` (0600 permissions) — never a
+fixed/guessable credential. Either renderer logs and runs headless if its own
+dependency (fastapi/uvicorn, or gradio) is missing.
 
 ## CLI reference
 
@@ -77,8 +82,8 @@ surface [--db PATH] init --stage <preset>
 surface [--db PATH] status                                # summarize project state
 surface [--db PATH] tui                                   # stdlib terminal board (no gradio needed)
 surface [--db PATH] serve [--no-board] [--max-iterations N]
-                          [--host HOST] [--port PORT] [--runtime-dir DIR]
-                          [--pool-size N] [--recycle-after-events N]
+                          [--renderer {web,gradio}] [--host HOST] [--port PORT]
+                          [--runtime-dir DIR] [--pool-size N] [--recycle-after-events N]
 surface [--db PATH] stop
 surface [--db PATH] interrupt
 surface [--db PATH] recover [--force-reclaim]
@@ -155,7 +160,8 @@ surface/
   transports/                # WorkerTransport implementations
   worker.py                  # reference deterministic worker
   poller.py, providers/      # async job polling + mock generation providers
-  board.py                   # Gradio board UI
+  board.py                   # display model + action handler (renderer-independent)
+  board_web.py, static/      # default board renderer (FastAPI + hand-written HTML/CSS/JS)
   stages/                    # stage config loader + presets
   cli.py                     # surface CLI entrypoint
 tests/

@@ -483,6 +483,78 @@ class Store:
         res["payload"] = json.loads(res["payload_json"]) if res.get("payload_json") else {}
         return res
 
+    ACTIVE_EVENT_STATUSES = ("pending", "processing")
+
+    def list_active_events(
+        self, artifact_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Every event that has been accepted but not yet resolved.
+
+        "Active" means `status IN ('pending', 'processing')`: the event is
+        either sitting in the inbox waiting for a worker to claim it, or a
+        worker has claimed it and is mid-turn. Either way the user's click
+        has landed in the store but its effect is not visible yet, which is
+        exactly the state a renderer has to be able to show ("2 queued"
+        rather than a static "Ready").
+
+        The store owns this query because the store is the source of truth
+        for the inbox (SPEC principle 1); a renderer must not reach into
+        `store.conn` to derive it.
+
+        Args:
+            artifact_id: restrict to events referencing this artifact. Pass
+                None for every active event in the project, including the
+                artifact-less ones.
+
+        Returns:
+            Event dicts (same shape as `get_event`, payload decoded), oldest
+            first, so `[0]` is the longest-waiting item.
+        """
+        cursor = self.conn.cursor()
+        placeholders = ",".join("?" for _ in self.ACTIVE_EVENT_STATUSES)
+        params: List[Any] = list(self.ACTIVE_EVENT_STATUSES)
+        sql = f"SELECT * FROM events WHERE status IN ({placeholders})"
+        if artifact_id is not None:
+            sql += " AND artifact_id = ?"
+            params.append(artifact_id)
+        sql += " ORDER BY created_at ASC, id ASC"
+        cursor.execute(sql, params)
+
+        events = []
+        for row in cursor.fetchall():
+            res = dict(row)
+            res["payload"] = (
+                json.loads(res["payload_json"]) if res.get("payload_json") else {}
+            )
+            events.append(res)
+        return events
+
+    def count_active_events(
+        self, artifact_id: Optional[str] = None
+    ) -> Dict[str, int]:
+        """Counts of unresolved inbox work, split by status.
+
+        Returns a dict with `pending`, `processing` and `total` keys (always
+        present, zero when empty) so callers can render "3 queued, 1 working"
+        without post-processing a list.
+        """
+        counts = {"pending": 0, "processing": 0, "total": 0}
+        cursor = self.conn.cursor()
+        placeholders = ",".join("?" for _ in self.ACTIVE_EVENT_STATUSES)
+        params: List[Any] = list(self.ACTIVE_EVENT_STATUSES)
+        sql = (
+            f"SELECT status, COUNT(*) FROM events WHERE status IN ({placeholders})"
+        )
+        if artifact_id is not None:
+            sql += " AND artifact_id = ?"
+            params.append(artifact_id)
+        sql += " GROUP BY status"
+        cursor.execute(sql, params)
+        for status, count in cursor.fetchall():
+            counts[status] = count
+            counts["total"] += count
+        return counts
+
     def reclaim_expired_leases(self) -> List[str]:
         """Return processing events with an expired lease to 'pending' and
         release their artifact locks, WITHOUT claiming a new event.
