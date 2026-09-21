@@ -450,15 +450,15 @@ is upconverted, so an older prompt never becomes wrong.
 `surface render` / `wait` / `answer` is this API: `render` persists a stage
 config + data as a durable handle, `wait` polls it bounded, `answer` closes
 the round-trip. It ships with **no renderer**, so pair it with a thin UI.
-`demo/satellite/loop.py` is a working reference (FastAPI + three static
+`demo/surface/loop.py` is a working reference (FastAPI + three static
 files + a `claude -p` subprocess as the agent) that records every turn
 through `render`/`answer`, giving a durable transcript without the queue.
 
 Run it:
 
 ```bash
-python demo/satellite/loop.py                # no auth, loopback
-python demo/satellite/loop.py --pin 4821     # optional 4/6-digit gate
+python demo/surface/loop.py                # no auth, loopback
+python demo/surface/loop.py --pin 4821     # optional 4/6-digit gate
 ```
 
 Auth is off by default: the server binds loopback, so a login form buys
@@ -608,7 +608,7 @@ When delegating to a sub-agent:
 - **Any queued/working indicator in the board** -- a pending event is
   indistinguishable from a dead button (see "Queued Actions Are Invisible")
 - **A renderer for `render`/`wait`/`answer`** -- the handle API exists with
-  nothing drawing it (`demo/satellite/loop.py` is a reference implementation)
+  nothing drawing it (`demo/surface/loop.py` is a reference implementation)
 
 ---
 

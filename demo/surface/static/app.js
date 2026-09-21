@@ -278,8 +278,12 @@ function render(s) {
     copy.title = "Copy the final text";
     const again = document.createElement("button");
     again.className = "primary";
-    again.textContent = "New poem";
-    again.onclick = () => location.reload();
+    again.textContent = "Start over";
+    again.onclick = () => {
+      viewing = null;
+      $("stalebar").classList.remove("on");
+      fetch("/reset", { method: "POST" }).then((r) => r.json()).then(render);
+    };
     row.appendChild(copy);
     row.appendChild(again);
     controls.appendChild(row);

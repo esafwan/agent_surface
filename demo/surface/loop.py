@@ -1,4 +1,4 @@
-"""Satellite-shaped agent loop on top of agent_surface.
+"""Live agent surface: the agent renders its own UI.
 
 Contrast with `surface serve`: there the UI is fixed by a stage config and the
 agent writes into an async queue, so a click has no visible consequence until
@@ -8,7 +8,7 @@ synchronous, so "working" is always on screen.
 
 Each turn is persisted through the skill's own interaction store
 (`surface render` -> handle, `surface answer` -> value), which is the
-Satellite-shaped API agent_surface already shipped but never wired to a
+render/answer API agent_surface already shipped but never wired to a
 renderer.
 
 Agent contract (strict JSON, nothing else):
@@ -18,8 +18,8 @@ Legacy `{"actions": ["approve","revise"]}` is still accepted and normalized
 into a buttons control, so an older prompt never becomes wrong.
 
 Run:
-    python demo/satellite/loop.py                 # no auth, loopback
-    python demo/satellite/loop.py --pin 1234      # optional 4/6-digit gate
+    python demo/surface/loop.py                 # no auth, loopback
+    python demo/surface/loop.py --pin 1234      # optional 4/6-digit gate
 """
 
 import argparse
@@ -335,19 +335,23 @@ def record_answer(handle: Optional[str], text: str) -> None:
 # mid-turn repaints the real state instead of orphaning the loop.
 # ---------------------------------------------------------------------------
 
-SESSION: Dict[str, Any] = {
-    "history": [],
-    "handle": None,
-    "response": {"mode": "doc", "blocks": [], "draft": None,
-                 "ask": "What do you want me to write?",
-                 "controls": [{"type": "text", "id": "note", "label": "",
-                               "placeholder": "e.g. a love poem"}],
-                 "done": False, "malformed": False},
-    "versions": [],      # [{"n": 1, "draft": str, "note": str, "at": float}]
-    "inflight": False,
-    "started_at": 0.0,
-    "turns": 0,
-}
+def fresh_session() -> Dict[str, Any]:
+    return {
+        "history": [],
+        "handle": None,
+        "response": {"mode": "doc", "blocks": [], "draft": None,
+                     "ask": "What do you want me to write?",
+                     "controls": [{"type": "text", "id": "note", "label": "",
+                                   "placeholder": "e.g. a love poem"}],
+                     "done": False, "malformed": False},
+        "versions": [],  # [{"n": 1, "draft": str, "note": str, "at": float}]
+        "inflight": False,
+        "started_at": 0.0,
+        "turns": 0,
+    }
+
+
+SESSION: Dict[str, Any] = fresh_session()
 
 PIN: Optional[str] = None
 SECRET = secrets.token_bytes(32)
@@ -355,7 +359,7 @@ _attempts: List[float] = []
 
 
 def session_cookie() -> str:
-    return hmac.new(SECRET, b"satellite", "sha256").hexdigest()
+    return hmac.new(SECRET, b"agent-surface", "sha256").hexdigest()
 
 
 def authed(request: Request) -> bool:
@@ -454,6 +458,17 @@ def _run_turn(text: str) -> Dict[str, Any]:
     return render_payload()
 
 
+@app.post("/reset")
+def reset(request: Request):
+    """Start over. The session lives on the server, so a client-side reload
+    would just re-fetch the finished state -- the reset has to happen here."""
+    if not authed(request):
+        return JSONResponse({"error": "auth"}, status_code=401)
+    SESSION.clear()
+    SESSION.update(fresh_session())
+    return render_payload()
+
+
 @app.get("/version/{n}")
 def version(n: int, request: Request):
     if not authed(request):
@@ -469,7 +484,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 def main() -> None:
     global PIN
-    parser = argparse.ArgumentParser(description="Satellite-shaped agent loop")
+    parser = argparse.ArgumentParser(description="Live agent surface")
     parser.add_argument("--pin", help="Optional 4- or 6-digit gate (default: no auth)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7872)
@@ -490,7 +505,7 @@ def main() -> None:
     # this process's memory reads the PIN. This is a convenience lock for a
     # single-user localhost app; it is not an authentication system and must
     # not be exposed to a network.
-    print(f"satellite loop on http://{args.host}:{args.port}"
+    print(f"agent surface on http://{args.host}:{args.port}"
           f"{'  (pin required)' if PIN else '  (no auth)'}", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

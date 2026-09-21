@@ -251,7 +251,23 @@ button.primary {
   background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
 }
 button.primary:hover:not(:disabled) { filter: brightness(1.08); }
-button:disabled { opacity: .4; cursor: default; }
+/* Disabled must restate its own colours. Fading a filled button with opacity
+   leaves white label text on a washed-out fill -- unreadable, and it hits
+   every button for the whole in-flight phase. */
+button:disabled,
+button.primary:disabled {
+  opacity: 1;
+  cursor: default;
+  background: var(--bg-sunken);
+  color: var(--fg-faint);
+  border-color: var(--border);
+  filter: none;
+}
+button:focus-visible, input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
 
 .chip {
   padding: 8px var(--s3); border-radius: var(--r-pill);
@@ -272,7 +288,7 @@ input[type="text"]:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-input:disabled { opacity: .4; }
+input:disabled { background: var(--bg-sunken); color: var(--fg-faint); }
 
 /* --- table ------------------------------------------------------------- */
 table { border-collapse: collapse; width: 100%; font-size: var(--fs-sm); }

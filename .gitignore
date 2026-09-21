@@ -25,4 +25,4 @@ dist/
 # Demo runtime artifacts
 demo/**/*.log
 demo/**/interactions/
-demo/satellite/turn.json
+demo/**/turn.json
