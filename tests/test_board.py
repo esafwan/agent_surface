@@ -697,6 +697,97 @@ def test_gradio_build_board_availability():
     assert board is not None
 
 
+def test_gradio_board_has_live_refresh_wiring():
+    """The board must poll the store and re-render its card tree.
+
+    Grounded in gradio 5.50's real API (gradio/renderable.py): `gr.render`
+    with `triggers=None` and `inputs=[signal]` registers exactly two
+    triggers -- (root_block, "load") for the first paint and
+    `signal.change` for every rebuild -- and records a `Renderable` on
+    `Blocks.renderables`.
+    """
+    gr = pytest.importorskip("gradio")
+
+    from surface.board import build_board
+
+    store = Store(":memory:")
+    config = load_preset("movie")
+    board = build_board(store, config)
+
+    # A polling timer exists (2s interval).
+    timers = [b for b in board.blocks.values() if isinstance(b, gr.Timer)]
+    assert len(timers) == 1
+    assert timers[0].value == 2
+
+    # The card tree is a reactive render, not a one-shot construction.
+    assert len(board.renderables) == 1
+    trigger_names = {t.event_name for t in board.renderables[0].triggers}
+    assert trigger_names == {"load", "change"}
+
+
+def test_gradio_render_function_rebuilds_from_fresh_store(populated_store, stage_config):
+    """Re-running the @gr.render function must re-read the store.
+
+    NOTE: this exercises the render function exactly as gradio does
+    (`Renderable.apply`), but it cannot prove the *browser* receives the
+    update -- that requires a live server and a real client, which this
+    test suite has no access to. It proves the Python side reconstructs
+    the card tree from current store state on every invocation.
+    """
+    pytest.importorskip("gradio")
+    from gradio.context import LocalContext
+
+    from surface.board import build_board
+
+    board = build_board(populated_store, stage_config)
+    renderable = board.renderables[0]
+    LocalContext.blocks_config.set(board.default_config)
+
+    try:
+        def rendered_texts():
+            before = set(board.default_config.blocks)
+            renderable.apply("signal")
+            new_ids = set(board.default_config.blocks) - before
+            return " ".join(
+                str(getattr(board.default_config.blocks[i], "value", ""))
+                for i in new_ids
+            )
+
+        first = rendered_texts()
+        assert "Movie Script" in first
+        assert "Brand New Artifact" not in first
+
+        # A store change made *after* the board was constructed must show up
+        # on the next render -- this is the whole point of the fix.
+        populated_store.create_artifact(
+            id="script_999", stage="script", title="Brand New Artifact"
+        )
+        second = rendered_texts()
+        assert "Brand New Artifact" in second
+    finally:
+        LocalContext.blocks_config.set(None)
+
+
+def test_board_state_fingerprint_tracks_store_changes(populated_store, stage_config):
+    """The fingerprint that gates re-rendering must be stable when the store
+    is unchanged and must change when it is not."""
+    from surface.board import board_state_fingerprint
+
+    builder = DisplayModelBuilder(populated_store, stage_config)
+
+    a = board_state_fingerprint(builder.build_board_display())
+    b = board_state_fingerprint(builder.build_board_display())
+    assert a == b
+
+    # A forced (nonce) bump changes it even with an identical store.
+    assert board_state_fingerprint(builder.build_board_display(), 1) != a
+
+    populated_store.put_version(
+        "script_001", content="A brand new draft", created_by="user", select=True
+    )
+    assert board_state_fingerprint(builder.build_board_display()) != a
+
+
 # =============================================================================
 # Edge Case Tests
 # =============================================================================

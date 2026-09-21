@@ -1126,6 +1126,36 @@ def format_version_line(version: VersionDisplayRow) -> str:
     return " · ".join(bits)
 
 
+def board_state_fingerprint(display: "BoardDisplayModel", nonce: int = 0) -> str:
+    """
+    Stable hash of everything the board renders.
+
+    Used to drive live refresh: the board polls the store on a timer, hashes
+    the freshly-built display model, and only re-renders the card tree when
+    this value actually changes. That keeps a 2-second poll from rebuilding
+    (and visually resetting) the DOM on every tick while the store is idle.
+
+    `nonce` lets a caller force a change (e.g. the manual Refresh button, or
+    an immediate post-action re-render) even when the store looks identical.
+
+    Set-valued fields are sorted and keys are sorted so the hash is a pure
+    function of state, never of dict/set iteration order.
+    """
+    data = display.to_dict()
+    for key in (
+        "generating_artifacts",
+        "stale_artifacts",
+        "failed_artifacts",
+        "locked_artifacts",
+    ):
+        value = data.get(key)
+        if isinstance(value, list):
+            data[key] = sorted(str(v) for v in value)
+    data["_nonce"] = nonce
+    payload = json.dumps(data, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def content_textbox_lines(content: Optional[str]) -> int:
     """
     Pick a sensible height for the content review surface.
@@ -1257,6 +1287,41 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
         result = action_handler.enqueue_message(message_text)
         return json.dumps(result)
 
+    # --- Live-refresh plumbing -------------------------------------------
+    #
+    # The card tree is rebuilt by a `@gr.render` function (see below), which
+    # Gradio re-runs whenever `state_signal` changes. `_nonce` is a mutable
+    # box so post-action handlers and the Refresh button can force a change
+    # even when the store content hash happens to be identical.
+    _nonce = {"n": 0}
+
+    def _current_fingerprint(bump: bool = False) -> str:
+        """Fresh store read -> stable hash of the whole rendered board."""
+        if bump:
+            _nonce["n"] += 1
+        return board_state_fingerprint(
+            display_builder.build_board_display(), _nonce["n"]
+        )
+
+    def _header_title(display: BoardDisplayModel) -> str:
+        return (
+            f"{stage_config.title} &nbsp;·&nbsp; "
+            f"{display.pending_review_count} pending review"
+        )
+
+    def after_action() -> Tuple[str, str]:
+        """Chained after every board action so the user sees the result of
+        their own click immediately, without waiting for the next timer tick.
+
+        Returns (header title, new state_signal value). The nonce bump makes
+        the signal change unconditionally, which is what re-triggers
+        `@gr.render`. It deliberately does NOT write `status_display`, so a
+        select_version conflict message stays on screen.
+        """
+        _nonce["n"] += 1
+        display = display_builder.build_board_display()
+        return _header_title(display), board_state_fingerprint(display, _nonce["n"])
+
     # Build Gradio interface
     with gr.Blocks(
         title=f"{stage_config.title} - Agent Surface Board",
@@ -1266,6 +1331,23 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
         # Single hidden sink for action results (JSON). Keeps every handler's
         # return value wired somewhere without adding visible chrome.
         action_sink = gr.Textbox(visible=False, label="result")
+
+        # Hidden re-render signal. Its VALUE is a hash of the whole board
+        # (see board_state_fingerprint); whenever it changes, the
+        # @gr.render function below rebuilds the entire card tree from a
+        # fresh store read. It lives OUTSIDE the render function so it is a
+        # stable component that both outside wiring (timer, Refresh) and
+        # inside-the-render action handlers can write to.
+        state_signal = gr.Textbox(
+            value=board_state_fingerprint(board_display, 0),
+            visible=False,
+            label="state-signal",
+        )
+
+        # Polls the store every 2s. The poll itself is cheap relative to the
+        # re-render, and it returns gr.skip() when nothing changed, so an
+        # idle board never rebuilds its DOM.
+        board_timer = gr.Timer(2)
 
         # --- Compact header bar: project on the left, live status on the right.
         with gr.Row(elem_id="board-header"):
@@ -1281,346 +1363,391 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                 "Refresh", variant="secondary", size="sm", scale=0, min_width=90
             )
 
-        # --- One tab per stage.
-        with gr.Tabs():
-            for stage_group in board_display.stages:
-                tab_label = (
-                    f"{stage_group.stage_title} ({stage_group.approved_count}/{stage_group.total_count})"
-                    if stage_group.total_count
-                    else stage_group.stage_title
-                )
-                stage_obj = stage_config.get_stage(stage_group.stage_id)
-                form_schema = getattr(stage_obj, "form_schema", None)
-                with gr.Tab(label=tab_label):
-                    if not stage_group.artifacts:
-                        gr.Markdown(
-                            "_No artifacts in this stage yet._",
-                            elem_classes=["subtle-note"],
-                        )
-                        continue
+        # --- Live card tree -------------------------------------------
+        #
+        # Everything below is rebuilt from a FRESH store read every time
+        # Gradio re-runs this function. Per gradio/renderable.py, passing
+        # `triggers=None` with `inputs=[state_signal]` registers exactly two
+        # triggers: (root_block, "load") for the first paint, and
+        # state_signal.change for every subsequent rebuild. Components and
+        # event listeners created inside are torn down and re-bound on each
+        # render, so per-card action handlers always close over current data.
+        @gr.render(inputs=[state_signal], show_progress="hidden")
+        def render_board(_signal):
+            board_display = display_builder.build_board_display()
 
-                    for artifact_card in stage_group.artifacts:
-                        artifact_state = gr.State(artifact_card.artifact_id)
-
-                        with gr.Column(elem_classes=["artifact-card"]):
-                            # Title + one-line metadata badge row.
+            # --- One tab per stage.
+            with gr.Tabs():
+                for stage_group in board_display.stages:
+                    tab_label = (
+                        f"{stage_group.stage_title} ({stage_group.approved_count}/{stage_group.total_count})"
+                        if stage_group.total_count
+                        else stage_group.stage_title
+                    )
+                    stage_obj = stage_config.get_stage(stage_group.stage_id)
+                    form_schema = getattr(stage_obj, "form_schema", None)
+                    with gr.Tab(label=tab_label):
+                        if not stage_group.artifacts:
                             gr.Markdown(
-                                f"### {artifact_card.title}",
-                                elem_classes=["artifact-title"],
+                                "_No artifacts in this stage yet._",
+                                elem_classes=["subtle-note"],
                             )
-                            gr.Markdown(
-                                format_artifact_meta(artifact_card),
-                                elem_classes=["artifact-meta"],
-                            )
+                            continue
 
-                            # --- The review surface: the dominant element.
-                            form_properties: List[Any] = []
-                            if artifact_card.selected_version:
-                                sel_ver = artifact_card.selected_version
-                                content_kind, content_value = render_version_content(sel_ver)
-                                form_properties = (
-                                    schema_properties(form_schema)
-                                    if form_schema and content_kind == "text"
-                                    else []
+                        for artifact_card in stage_group.artifacts:
+                            artifact_state = gr.State(artifact_card.artifact_id)
+
+                            with gr.Column(elem_classes=["artifact-card"]):
+                                # Title + one-line metadata badge row.
+                                gr.Markdown(
+                                    f"### {artifact_card.title}",
+                                    elem_classes=["artifact-title"],
+                                )
+                                gr.Markdown(
+                                    format_artifact_meta(artifact_card),
+                                    elem_classes=["artifact-meta"],
                                 )
 
-                                if form_properties:
-                                    # SPEC section 31: JSON Schema forms MAY
-                                    # be mapped to native controls instead of
-                                    # a raw JSON blob the user hand-edits.
-                                    answers = parse_form_answers(content_value)
-                                    field_components: List[Any] = []
-                                    field_names: List[str] = []
-                                    required_names = set(
-                                        form_schema.get("required", [])
-                                        if isinstance(form_schema, dict)
+                                # --- The review surface: the dominant element.
+                                form_properties: List[Any] = []
+                                if artifact_card.selected_version:
+                                    sel_ver = artifact_card.selected_version
+                                    content_kind, content_value = render_version_content(sel_ver)
+                                    form_properties = (
+                                        schema_properties(form_schema)
+                                        if form_schema and content_kind == "text"
                                         else []
                                     )
-                                    for prop_name, prop_schema in form_properties:
-                                        label = field_label_for(prop_name, prop_schema)
-                                        current = answers.get(
-                                            prop_name, prop_schema.get("default", "")
+
+                                    if form_properties:
+                                        # SPEC section 31: JSON Schema forms MAY
+                                        # be mapped to native controls instead of
+                                        # a raw JSON blob the user hand-edits.
+                                        answers = parse_form_answers(content_value)
+                                        field_components: List[Any] = []
+                                        field_names: List[str] = []
+                                        required_names = set(
+                                            form_schema.get("required", [])
+                                            if isinstance(form_schema, dict)
+                                            else []
                                         )
-                                        enum_choices = prop_schema.get("enum")
-                                        prop_type = prop_schema.get("type", "string")
-                                        # Own label row + bare control: no
-                                        # Gradio BlockTitle pill anywhere.
-                                        with gr.Column(elem_classes=["field-block"]):
-                                            gr.Markdown(
-                                                render_field_label(
-                                                    label,
-                                                    required=prop_name in required_names,
-                                                    description=prop_schema.get(
-                                                        "description"
+                                        for prop_name, prop_schema in form_properties:
+                                            label = field_label_for(prop_name, prop_schema)
+                                            current = answers.get(
+                                                prop_name, prop_schema.get("default", "")
+                                            )
+                                            enum_choices = prop_schema.get("enum")
+                                            prop_type = prop_schema.get("type", "string")
+                                            # Own label row + bare control: no
+                                            # Gradio BlockTitle pill anywhere.
+                                            with gr.Column(elem_classes=["field-block"]):
+                                                gr.Markdown(
+                                                    render_field_label(
+                                                        label,
+                                                        required=prop_name in required_names,
+                                                        description=prop_schema.get(
+                                                            "description"
+                                                        ),
                                                     ),
-                                                ),
-                                                elem_classes=["field-label"],
-                                            )
-                                            if enum_choices:
-                                                field = gr.Dropdown(
-                                                    choices=[str(c) for c in enum_choices],
-                                                    value=(
-                                                        str(current)
-                                                        if current not in (None, "")
-                                                        else None
-                                                    ),
-                                                    show_label=False,
-                                                    container=False,
-                                                    elem_classes=["field-control"],
+                                                    elem_classes=["field-label"],
                                                 )
-                                            elif prop_type in ("integer", "number"):
-                                                field = gr.Number(
-                                                    value=current
-                                                    if isinstance(current, (int, float))
-                                                    else None,
-                                                    show_label=False,
-                                                    container=False,
-                                                    elem_classes=["field-control"],
-                                                )
-                                            elif prop_type == "boolean":
-                                                field = gr.Checkbox(
-                                                    value=bool(current),
-                                                    label=label,
-                                                    show_label=False,
-                                                    container=False,
-                                                    elem_classes=["field-control"],
-                                                )
-                                            else:
-                                                field = gr.Textbox(
-                                                    value=str(current) if current is not None else "",
-                                                    show_label=False,
-                                                    container=False,
-                                                    lines=1,
-                                                    elem_classes=["field-control"],
-                                                )
-                                        field_components.append(field)
-                                        field_names.append(prop_name)
+                                                if enum_choices:
+                                                    field = gr.Dropdown(
+                                                        choices=[str(c) for c in enum_choices],
+                                                        value=(
+                                                            str(current)
+                                                            if current not in (None, "")
+                                                            else None
+                                                        ),
+                                                        show_label=False,
+                                                        container=False,
+                                                        elem_classes=["field-control"],
+                                                    )
+                                                elif prop_type in ("integer", "number"):
+                                                    field = gr.Number(
+                                                        value=current
+                                                        if isinstance(current, (int, float))
+                                                        else None,
+                                                        show_label=False,
+                                                        container=False,
+                                                        elem_classes=["field-control"],
+                                                    )
+                                                elif prop_type == "boolean":
+                                                    field = gr.Checkbox(
+                                                        value=bool(current),
+                                                        label=label,
+                                                        show_label=False,
+                                                        container=False,
+                                                        elem_classes=["field-control"],
+                                                    )
+                                                else:
+                                                    field = gr.Textbox(
+                                                        value=str(current) if current is not None else "",
+                                                        show_label=False,
+                                                        container=False,
+                                                        lines=1,
+                                                        elem_classes=["field-control"],
+                                                    )
+                                            field_components.append(field)
+                                            field_names.append(prop_name)
 
-                                    if "edit" in artifact_card.allowed_actions:
-                                        with gr.Row(elem_classes=["action-bar"]):
-                                            btn_submit_form = gr.Button(
-                                                "Submit form", variant="primary", size="sm",
-                                                scale=0, min_width=120,
-                                            )
+                                        if "edit" in artifact_card.allowed_actions:
+                                            with gr.Row(elem_classes=["action-bar"]):
+                                                btn_submit_form = gr.Button(
+                                                    "Submit form", variant="primary", size="sm",
+                                                    scale=0, min_width=120,
+                                                )
 
-                                        def handle_form_submit(
-                                            artifact_id, *values, _names=field_names
-                                        ):
-                                            content = build_form_answers_json(
-                                                _names, list(values)
-                                            )
-                                            result = action_handler.enqueue_edit(
-                                                artifact_id, content
-                                            )
-                                            return json.dumps(result)
+                                            def handle_form_submit(
+                                                artifact_id, *values, _names=field_names
+                                            ):
+                                                content = build_form_answers_json(
+                                                    _names, list(values)
+                                                )
+                                                result = action_handler.enqueue_edit(
+                                                    artifact_id, content
+                                                )
+                                                return json.dumps(result)
 
-                                        btn_submit_form.click(
-                                            handle_form_submit,
-                                            inputs=[artifact_state] + field_components,
-                                            outputs=action_sink,
-                                        )
-                                elif content_kind == "image":
-                                    resolved_path = _resolve_media_path(content_value)
-                                    if resolved_path:
-                                        gr.Image(
-                                            value=resolved_path,
+                                            btn_submit_form.click(
+                                                handle_form_submit,
+                                                inputs=[artifact_state] + field_components,
+                                                outputs=action_sink,
+                                            ).then(
+                                                after_action,
+                                                outputs=[title_display, state_signal],
+                                                show_progress="hidden",
+                                            )
+                                    elif content_kind == "image":
+                                        resolved_path = _resolve_media_path(content_value)
+                                        if resolved_path:
+                                            gr.Image(
+                                                value=resolved_path,
+                                                show_label=False,
+                                                interactive=False,
+                                                height=460,
+                                                elem_classes=["content-surface"],
+                                            )
+                                    elif content_kind == "video":
+                                        resolved_path = _resolve_media_path(content_value)
+                                        if resolved_path:
+                                            gr.Video(
+                                                value=resolved_path,
+                                                show_label=False,
+                                                interactive=False,
+                                                height=460,
+                                                elem_classes=["content-surface"],
+                                            )
+                                    elif content_kind == "audio":
+                                        resolved_path = _resolve_media_path(content_value)
+                                        if resolved_path:
+                                            gr.Audio(
+                                                value=resolved_path,
+                                                show_label=False,
+                                                interactive=False,
+                                                elem_classes=["content-surface"],
+                                            )
+                                    elif content_kind == "text" and content_value:
+                                        lines = content_textbox_lines(content_value)
+                                        gr.Textbox(
+                                            value=content_value,
                                             show_label=False,
+                                            container=False,
                                             interactive=False,
-                                            height=460,
+                                            lines=lines,
+                                            max_lines=lines,
                                             elem_classes=["content-surface"],
                                         )
-                                elif content_kind == "video":
-                                    resolved_path = _resolve_media_path(content_value)
-                                    if resolved_path:
-                                        gr.Video(
-                                            value=resolved_path,
-                                            show_label=False,
-                                            interactive=False,
-                                            height=460,
-                                            elem_classes=["content-surface"],
-                                        )
-                                elif content_kind == "audio":
-                                    resolved_path = _resolve_media_path(content_value)
-                                    if resolved_path:
-                                        gr.Audio(
-                                            value=resolved_path,
-                                            show_label=False,
-                                            interactive=False,
-                                            elem_classes=["content-surface"],
-                                        )
-                                elif content_kind == "text" and content_value:
-                                    lines = content_textbox_lines(content_value)
-                                    gr.Textbox(
-                                        value=content_value,
-                                        show_label=False,
-                                        container=False,
-                                        interactive=False,
-                                        lines=lines,
-                                        max_lines=lines,
-                                        elem_classes=["content-surface"],
+
+                                    # Prompt / note stay secondary: collapsed by default.
+                                    if sel_ver.prompt or sel_ver.note:
+                                        with gr.Accordion("Prompt & notes", open=False):
+                                            if sel_ver.prompt:
+                                                gr.Markdown(f"**Prompt** — {sel_ver.prompt}")
+                                            if sel_ver.note:
+                                                gr.Markdown(f"**Note** — {sel_ver.note}")
+                                else:
+                                    gr.Markdown(
+                                        "_No version selected yet._",
+                                        elem_classes=["subtle-note"],
                                     )
 
-                                # Prompt / note stay secondary: collapsed by default.
-                                if sel_ver.prompt or sel_ver.note:
-                                    with gr.Accordion("Prompt & notes", open=False):
-                                        if sel_ver.prompt:
-                                            gr.Markdown(f"**Prompt** — {sel_ver.prompt}")
-                                        if sel_ver.note:
-                                            gr.Markdown(f"**Note** — {sel_ver.note}")
-                            else:
-                                gr.Markdown(
-                                    "_No version selected yet._",
-                                    elem_classes=["subtle-note"],
-                                )
-
-                            # --- Version history: a compact collapsed list.
-                            if (
-                                len(artifact_card.all_versions) > 1
-                                and "select_version" in artifact_card.allowed_actions
-                            ):
-                                current_selection = (
-                                    artifact_card.selected_version.version_id
-                                    if artifact_card.selected_version
-                                    else ""
-                                )
-                                with gr.Accordion(
-                                    f"Version history ({len(artifact_card.all_versions)})",
-                                    open=False,
+                                # --- Version history: a compact collapsed list.
+                                if (
+                                    len(artifact_card.all_versions) > 1
+                                    and "select_version" in artifact_card.allowed_actions
                                 ):
-                                    for version in artifact_card.all_versions:
-                                        with gr.Row(elem_classes=["version-row"]):
-                                            gr.Markdown(
-                                                format_version_line(version),
-                                                elem_classes=["version-line"],
-                                            )
-                                            if version.is_selected:
-                                                gr.Button(
-                                                    "Selected",
-                                                    variant="secondary",
-                                                    size="sm",
-                                                    interactive=False,
-                                                    scale=0,
-                                                    min_width=88,
+                                    current_selection = (
+                                        artifact_card.selected_version.version_id
+                                        if artifact_card.selected_version
+                                        else ""
+                                    )
+                                    with gr.Accordion(
+                                        f"Version history ({len(artifact_card.all_versions)})",
+                                        open=False,
+                                    ):
+                                        for version in artifact_card.all_versions:
+                                            with gr.Row(elem_classes=["version-row"]):
+                                                gr.Markdown(
+                                                    format_version_line(version),
+                                                    elem_classes=["version-line"],
                                                 )
-                                            else:
-                                                btn_select = gr.Button(
-                                                    "Select",
-                                                    variant="secondary",
-                                                    size="sm",
-                                                    scale=0,
-                                                    min_width=88,
-                                                )
-                                                btn_select.click(
-                                                    handle_select_version,
-                                                    inputs=[
-                                                        artifact_state,
-                                                        gr.State(version.version_id),
-                                                        gr.State(current_selection),
-                                                    ],
-                                                    # Result to the hidden sink; any
-                                                    # conflict message to the visible
-                                                    # status line (SPEC section 41:
-                                                    # conflicts must be surfaced).
-                                                    outputs=[action_sink, status_display],
-                                                )
+                                                if version.is_selected:
+                                                    gr.Button(
+                                                        "Selected",
+                                                        variant="secondary",
+                                                        size="sm",
+                                                        interactive=False,
+                                                        scale=0,
+                                                        min_width=88,
+                                                    )
+                                                else:
+                                                    btn_select = gr.Button(
+                                                        "Select",
+                                                        variant="secondary",
+                                                        size="sm",
+                                                        scale=0,
+                                                        min_width=88,
+                                                    )
+                                                    btn_select.click(
+                                                        handle_select_version,
+                                                        inputs=[
+                                                            artifact_state,
+                                                            gr.State(version.version_id),
+                                                            gr.State(current_selection),
+                                                        ],
+                                                        # Result to the hidden sink; any
+                                                        # conflict message to the visible
+                                                        # status line (SPEC section 41:
+                                                        # conflicts must be surfaced).
+                                                        outputs=[action_sink, status_display],
+                                                    ).then(
+                                                        after_action,
+                                                        outputs=[title_display, state_signal],
+                                                        show_progress="hidden",
+                                                    )
 
-                            # --- Inputs for text edits / revision notes.
-                            # Skipped when a form was already rendered above
-                            # (its own Submit button is the edit path).
-                            if "edit" in artifact_card.allowed_actions and not form_properties:
-                                with gr.Row():
-                                    edit_content = gr.Textbox(
-                                        show_label=False,
-                                        container=False,
-                                        placeholder="Replace content…",
-                                        elem_classes=["field-control"],
-                                        lines=2,
-                                        scale=5,
-                                    )
-                                    btn_edit = gr.Button(
-                                        "Update", variant="secondary", size="sm",
-                                        scale=0, min_width=96,
-                                    )
-                                    btn_edit.click(
-                                        handle_edit_artifact,
-                                        inputs=[artifact_state, edit_content],
-                                        outputs=action_sink,
-                                    )
+                                # --- Inputs for text edits / revision notes.
+                                # Skipped when a form was already rendered above
+                                # (its own Submit button is the edit path).
+                                if "edit" in artifact_card.allowed_actions and not form_properties:
+                                    with gr.Row():
+                                        edit_content = gr.Textbox(
+                                            show_label=False,
+                                            container=False,
+                                            placeholder="Replace content…",
+                                            elem_classes=["field-control"],
+                                            lines=2,
+                                            scale=5,
+                                        )
+                                        btn_edit = gr.Button(
+                                            "Update", variant="secondary", size="sm",
+                                            scale=0, min_width=96,
+                                        )
+                                        btn_edit.click(
+                                            handle_edit_artifact,
+                                            inputs=[artifact_state, edit_content],
+                                            outputs=action_sink,
+                                        ).then(
+                                            after_action,
+                                            outputs=[title_display, state_signal],
+                                            show_progress="hidden",
+                                        )
 
-                            if "revise" in artifact_card.allowed_actions:
-                                with gr.Row():
-                                    revision_note = gr.Textbox(
-                                        show_label=False,
-                                        container=False,
-                                        placeholder="Revision note for the worker…",
-                                        elem_classes=["field-control"],
-                                        lines=1,
-                                        scale=5,
-                                    )
-                                    btn_revise = gr.Button(
-                                        "Revise", variant="secondary", size="sm",
-                                        scale=0, min_width=96,
-                                    )
-                                    btn_revise.click(
-                                        handle_revise_artifact,
-                                        inputs=[artifact_state, revision_note],
-                                        outputs=action_sink,
-                                    )
+                                if "revise" in artifact_card.allowed_actions:
+                                    with gr.Row():
+                                        revision_note = gr.Textbox(
+                                            show_label=False,
+                                            container=False,
+                                            placeholder="Revision note for the worker…",
+                                            elem_classes=["field-control"],
+                                            lines=1,
+                                            scale=5,
+                                        )
+                                        btn_revise = gr.Button(
+                                            "Revise", variant="secondary", size="sm",
+                                            scale=0, min_width=96,
+                                        )
+                                        btn_revise.click(
+                                            handle_revise_artifact,
+                                            inputs=[artifact_state, revision_note],
+                                            outputs=action_sink,
+                                        ).then(
+                                            after_action,
+                                            outputs=[title_display, state_signal],
+                                            show_progress="hidden",
+                                        )
 
-                            # --- Action bar: one row, weighted by importance.
-                            with gr.Row(elem_classes=["action-bar"]):
-                                if "approve" in artifact_card.allowed_actions:
-                                    btn_approve = gr.Button(
-                                        "Approve (locked)" if artifact_card.locked else "Approve",
-                                        variant="primary",
-                                        size="sm",
-                                        interactive=not artifact_card.locked,
-                                        scale=0,
-                                        min_width=120,
-                                    )
-                                    btn_approve.click(
-                                        handle_approve_artifact,
-                                        inputs=[artifact_state, gr.State(False)],
-                                        outputs=action_sink,
-                                    )
+                                # --- Action bar: one row, weighted by importance.
+                                with gr.Row(elem_classes=["action-bar"]):
+                                    if "approve" in artifact_card.allowed_actions:
+                                        btn_approve = gr.Button(
+                                            "Approve (locked)" if artifact_card.locked else "Approve",
+                                            variant="primary",
+                                            size="sm",
+                                            interactive=not artifact_card.locked,
+                                            scale=0,
+                                            min_width=120,
+                                        )
+                                        btn_approve.click(
+                                            handle_approve_artifact,
+                                            inputs=[artifact_state, gr.State(False)],
+                                            outputs=action_sink,
+                                        ).then(
+                                            after_action,
+                                            outputs=[title_display, state_signal],
+                                            show_progress="hidden",
+                                        )
 
-                                if "regenerate" in artifact_card.allowed_actions:
-                                    btn_regen = gr.Button(
-                                        "Regenerate", variant="secondary", size="sm",
-                                        scale=0, min_width=110,
-                                    )
-                                    btn_regen.click(
-                                        handle_regenerate_artifact,
-                                        inputs=artifact_state,
-                                        outputs=action_sink,
-                                    )
+                                    if "regenerate" in artifact_card.allowed_actions:
+                                        btn_regen = gr.Button(
+                                            "Regenerate", variant="secondary", size="sm",
+                                            scale=0, min_width=110,
+                                        )
+                                        btn_regen.click(
+                                            handle_regenerate_artifact,
+                                            inputs=artifact_state,
+                                            outputs=action_sink,
+                                        ).then(
+                                            after_action,
+                                            outputs=[title_display, state_signal],
+                                            show_progress="hidden",
+                                        )
 
-                                if "lock" in artifact_card.allowed_actions:
-                                    btn_lock = gr.Button(
-                                        "Unlock" if artifact_card.locked else "Lock",
-                                        variant="secondary",
-                                        size="sm",
-                                        scale=0,
-                                        min_width=96,
-                                    )
-                                    btn_lock.click(
-                                        handle_unlock_artifact
-                                        if artifact_card.locked
-                                        else handle_lock_artifact,
-                                        inputs=artifact_state,
-                                        outputs=action_sink,
-                                    )
+                                    if "lock" in artifact_card.allowed_actions:
+                                        btn_lock = gr.Button(
+                                            "Unlock" if artifact_card.locked else "Lock",
+                                            variant="secondary",
+                                            size="sm",
+                                            scale=0,
+                                            min_width=96,
+                                        )
+                                        btn_lock.click(
+                                            handle_unlock_artifact
+                                            if artifact_card.locked
+                                            else handle_lock_artifact,
+                                            inputs=artifact_state,
+                                            outputs=action_sink,
+                                        ).then(
+                                            after_action,
+                                            outputs=[title_display, state_signal],
+                                            show_progress="hidden",
+                                        )
 
-                                if "cancel" in artifact_card.allowed_actions:
-                                    btn_cancel = gr.Button(
-                                        "Cancel", variant="stop", size="sm",
-                                        scale=0, min_width=96,
-                                    )
-                                    btn_cancel.click(
-                                        handle_cancel_artifact,
-                                        inputs=artifact_state,
-                                        outputs=action_sink,
-                                    )
+                                    if "cancel" in artifact_card.allowed_actions:
+                                        btn_cancel = gr.Button(
+                                            "Cancel", variant="stop", size="sm",
+                                            scale=0, min_width=96,
+                                        )
+                                        btn_cancel.click(
+                                            handle_cancel_artifact,
+                                            inputs=artifact_state,
+                                            outputs=action_sink,
+                                        ).then(
+                                            after_action,
+                                            outputs=[title_display, state_signal],
+                                            show_progress="hidden",
+                                        )
 
         # --- Worker message box: one compact line at the foot of the page.
         with gr.Row():
@@ -1639,11 +1766,43 @@ def build_board(store: Store, stage_config: StageConfig, media_dir: Optional[str
                 handle_message,
                 inputs=message_input,
                 outputs=action_sink,
+            ).then(
+                after_action,
+                outputs=[title_display, state_signal],
+                show_progress="hidden",
             )
 
         btn_refresh.click(
             refresh_board,
             outputs=[title_display, status_display, action_sink],
+        ).then(
+            # Force a rebuild even if the store is byte-identical: the
+            # nonce bump guarantees state_signal changes, which is the
+            # @gr.render trigger.
+            lambda: _current_fingerprint(bump=True),
+            outputs=state_signal,
+            show_progress="hidden",
+        )
+
+        def poll_board(current_signal):
+            """Timer tick: re-read the store, update the header, and flip
+            `state_signal` only when something actually changed.
+
+            The previous fingerprint is read back FROM the signal component
+            (an input), not from module/closure state, so the comparison is
+            per-browser-session and two open tabs can't starve each other.
+            """
+            display = display_builder.build_board_display()
+            fingerprint = board_state_fingerprint(display, _nonce["n"])
+            if fingerprint == current_signal:
+                return gr.skip(), gr.skip(), gr.skip()
+            return _header_title(display), display.status_message, fingerprint
+
+        board_timer.tick(
+            poll_board,
+            inputs=[state_signal],
+            outputs=[title_display, status_display, state_signal],
+            show_progress="hidden",
         )
 
     return demo
