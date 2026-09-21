@@ -99,81 +99,77 @@ inconsistency in the parts I didn't personally read. **This is exactly what
 the adversarial review below is for — do not treat my spot-checks above as
 a substitute for it.**
 
-## Adversarial review — in progress
+## Merged: `11e66de` on main. 504 tests passing, 3 skipped.
 
-A second Opus sub-agent is reviewing the worktree diff against the checklist
-above (auth, query correctness w/ lease expiry, multi-stage, message-box
-server-side enforcement, action correctness via real clicks, test quality,
-`--renderer gradio` regression check, and the rest of `SKILL.md`'s diff),
-told explicitly to run things and click through flows, not just read code.
-Review only — it will not modify the worktree or touch `main`.
+Adversarial review came back with a clear verdict: **"Safe to merge with
+fixes."** It ran things, not just read code — 60 tool calls, real
+reproductions against a live server and a real browser. Four blocking
+issues, three smaller ones, all fixed before merge:
 
-## In progress before that — DO NOT TRUST THIS SECTION AS A COMPLETION REPORT
+**Blocking:**
+- `/static/*` bypassed auth entirely (`app.mount(StaticFiles)` sits outside
+  the app's routing) — replaced with an explicit authed route.
+- A malformed `POST /api/action` body threw an unhandled 500 with a
+  traceback in the response — now a clean 400.
+- `README.md` was stale in 5 places (still described gradio as default,
+  wrong install instructions, no `--renderer` flag, `movie` as the
+  quickstart preset) — fixed, quickstart switched to `poem`.
+- Two claims in the SKILL.md text I'd just written were **already false**:
+  the shared `DisplayModelBuilder` fix means the legacy gradio board's
+  header *also* now reads "N queued" (a side effect neither the build agent
+  nor I had caught), directly contradicting what I'd written saying gradio
+  doesn't have this. Fixed, plus a stale "TUI is the only verified
+  renderer" paragraph the diff never touched.
 
-A background sub-agent (Opus, isolated git worktree, NOT yet reviewed or
-merged) is building `surface/board_web.py` — a FastAPI renderer reusing
-`DisplayModelBuilder`/`ActionHandler`/`BoardDisplayModel` from `board.py`
-**unchanged** (same "renderer is swappable" proof as `04`, this time for
-real). Brief given (full detail in the Agent tool call this session):
+**Non-blocking, fixed anyway:**
+- An event's expired lease showed "worker is on it" forever in
+  board-without-supervisor mode (`examples/02-agent-as-worker`) with
+  nothing to reclaim it. `build_board_display()` now calls
+  `reclaim_expired_leases()` before reading state.
+- "started Xs ago" measured from the event's `created_at`, not when a
+  worker actually claimed it. Added `oldest_claimed_at`, tracked separately.
+- The client treated any non-2xx response as success (`{}.ok === false` is
+  `false`), silently discarding the user's typed text on a 401 with no
+  feedback. Now checks `res.ok` first.
+- A test asserting stage-config gating posted an `edit` action and never
+  asserted anything about it. Fixed the assertion; added an honestly-named
+  test (`test_edit_is_not_stage_gated_known_gap`) for the real pre-existing
+  gap it was papering over — `edit`/`revise`/`regenerate`/`reopen`/`cancel`/
+  `message` were never stage-gated in `ActionHandler`, only
+  `approve`/`lock`/`unlock`/`select_version` are. Now HTTP-reachable via
+  this renderer; tracked, not silently passing.
 
-- **P0**: text/form artifact types, edit/revise/approve/reopen, multi-stage
-  tabs, version history/select-version, a **genuine** queued/working
-  indicator (new `Store` query: is there a pending/processing inbox event
-  against this artifact right now?), fix/remove the unbound "message the
-  worker" box, `04`'s design tokens (centred column, light+dark,
-  `pre-wrap`, disabled buttons that stay legible — the exact contrast bug
-  from `04` was named explicitly so it isn't repeated).
-- **P1** (land if time allows, defer honestly otherwise): image/video/diff
-  rendering, job/generation progress, locks, budget confirmation, live
-  refresh.
-- Told explicitly to run the full test suite before/after, verify in a real
-  browser via Playwright against both `poem.json` (simple) and `movie.json`
-  (complex, multi-stage), and report honestly what's verified vs. deferred
-  — not to claim parity it hasn't checked.
+Both renderers smoke-tested after every fix: `--renderer web` end-to-end in
+a real browser (multi-stage `movie.json`, image/video artifacts, live
+refresh, every action) and `--renderer gradio` via a direct
+`build_board()`/`DisplayModelBuilder` check confirming the shared
+`status_message`/`oldest_claimed_at` changes reach it too.
 
-**Last confirmed state before pausing** (checked via worktree file mtimes,
-not by reading the subagent's transcript — that would overflow context):
-worktree at `.claude/worktrees/agent-a4d86998e3c393ee5`, branch
-`worktree-agent-a4d86998e3c393ee5`, based on `334346d`. Files touched:
-`surface/board.py`, `surface/cli.py`, `surface/store.py`,
-`tests/test_cli.py`, `pyproject.toml` (modified); `surface/board_web.py`
-(new, 435 lines as of last check), `surface/static/{board.html,board.js,
-board.css}` (new), `tests/test_board_web.py` (new). File timestamps showed
-continuous activity up to the moment of the last check (~19:22–19:25 local,
-no gap) — genuinely working, not hung. **No commit made yet in the
-worktree** — still on `334346d`, changes are working-tree diffs.
+Worktree removed, branch deleted, main pushed. This phase is done.
 
-## To resume
+## Known follow-up, not done in this phase
 
-1. Check the sub-agent's status: `ListAgents` (name/id: the one spawned
-   this session for "Build a redesigned board renderer" — agentId is in
-   this session's own tool-call history, not repeated here since ids are
-   internal/not for user-facing text). If a `<task-notification>` already
-   arrived, its `status` field says `completed`/`failed`; read the result
-   it carries — do not re-derive from the worktree by hand once a real
-   report exists.
-2. If still running: worktree file mtimes are a legitimate way to check
-   liveness without reading its transcript (`find <worktree> -newer
-   <reference-file>` or `stat -f "%Sm %N" <files>` compared to `date`).
-3. Once it reports: **do not merge on trust.** Per the user's request this
-   session ("review with opus 5 low"), run a second Opus pass reviewing the
-   worktree diff adversarially before anything touches `main` — check the
-   P0 list above was actually met, the queued/working indicator is real
-   (not just CSS), the unbound-message-box bug is actually fixed, tests
-   genuinely pass (not just claimed), and the browser screenshots it
-   produced actually show what it says they show.
-4. Decide, with the user: replace `surface serve`'s default renderer
-   outright, or add it behind a flag (`--renderer web` vs. keeping Gradio
-   as `--renderer gradio`) — the build brief left this as the agent's call
-   to make and report on, not a pre-decided outcome.
-5. Merge from the worktree into `main` only after review; then `git
-   worktree remove` it (or leave it — worktrees auto-clean if unchanged,
-   per the Agent tool's own description, but this one has real changes so
-   won't auto-clean silently).
+Raised mid-review by the user, correctly: **`board_web.py`'s revise/edit
+labels are hardcoded JS strings** (`"Ask for a revision"`, `"What should
+change?"`) — identical for every artifact regardless of what the worker
+actually needs from the user. This is a different, separate gap from the
+queued-indicator fix above: `04-live-surface`'s `mode`/`blocks`/`controls`
+contract already solves exactly this (the agent declares label/placeholder/
+input-shape per turn), but that pattern has never been brought into the
+board. Doing so is real scope — it means extending `ActionHandler`'s
+contract, not just the renderer — and was deliberately left out of this
+phase's brief. Worth its own phase.
 
-## Known-good baseline if this needs to be abandoned
+Also raised, decided, not yet started: **retire `movie.json`** as the
+skill's reference workflow (full retirement chosen: rebuild
+`examples/01-board-basics` on a simpler stage config, stop citing movie as
+the reference example in SPEC.md/SKILL.md, mark `surface/stages/movie.json`
+itself as deprecated rather than advertised). Not started as of this
+commit.
 
-`main` at `334346d` is fully working and pushed: 477 tests passing, 3
-skipped, all four `examples/` runnable and manually verified this session.
-Nothing about this phase is required for the skill to function — it is a
-UX improvement to the existing, working (if confusing) Gradio board.
+
+---
+
+**This phase is closed.** Merged at `11e66de`, 504 tests passing, 3
+skipped. The two follow-ups above (agent-declared control labels, retiring
+`movie.json`) are separate, tracked, not started.
