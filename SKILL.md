@@ -412,22 +412,64 @@ For turn-taking work (ask -> answer -> refine -> approve), invert it: make
 the agent's **structured response define the UI**, and call it synchronously
 so "working" is always on screen.
 
+```jsonc
+{
+  "mode": "doc" | "chat" | "form",   // which surface to draw on; sticky
+  "blocks": [                        // what to show (<=4)
+    {"type": "verse",  "text": "line\nline"},
+    {"type": "prose",  "text": "a paragraph"},
+    {"type": "code",   "text": "x = 1", "lang": "py"},
+    {"type": "table",  "columns": ["a"], "rows": [["1"]]},
+    {"type": "thread", "turns": [{"role": "agent", "text": "hi"}]}
+  ],
+  "ask": "what to ask the user next",
+  "controls": [                      // what the user can do (<=3)
+    {"type": "buttons", "id": "verdict", "options": ["Approve", "Revise"]},
+    {"type": "choice",  "id": "tone",  "options": ["elegiac", "wry"]},
+    {"type": "multi",   "id": "edits", "options": ["shorter", "add a title"]},
+    {"type": "text",    "id": "note",  "placeholder": "say what to change…"}
+  ],
+  "done": false
+}
 ```
-agent -> {"draft": <current text|null>,
-          "ask":   <what to ask the user next>,
-          "actions": ["approve","revise"],
-          "done":  false}
-      -> renderer draws exactly that
-user  -> "sadder, and about hands"
-      -> agent called again with history ... loop
-```
+
+The agent picks **semantics** (which mode, which blocks); the design system
+keeps every visual decision in CSS, so the agent cannot make the page
+incoherent. A free-text control is injected whenever the agent omits one, so
+the user is never stuck.
+
+**The renderer must never trust the model.** A small model breaks contract
+regularly, and each failure has a defined degradation: unknown `mode` keeps
+the current one (layout never yanks out from under the user); unknown block
+type renders as prose; empty `blocks` keeps the previous content rather than
+blanking the user's work; malformed controls are dropped but the text box
+survives; unparseable JSON becomes a visible "the agent replied in the wrong
+format" state instead of an exception. Legacy `{"draft": ..., "actions": [...]}`
+is upconverted, so an older prompt never becomes wrong.
 
 `surface render` / `wait` / `answer` is this API: `render` persists a stage
 config + data as a durable handle, `wait` polls it bounded, `answer` closes
 the round-trip. It ships with **no renderer**, so pair it with a thin UI.
-`demo/satellite/loop.py` is a ~150-line working reference (Gradio + a
-`claude -p` subprocess as the agent) that records every turn through
-`render`/`answer`, giving a durable transcript without the queue.
+`demo/satellite/loop.py` is a working reference (FastAPI + three static
+files + a `claude -p` subprocess as the agent) that records every turn
+through `render`/`answer`, giving a durable transcript without the queue.
+
+Run it:
+
+```bash
+python demo/satellite/loop.py                # no auth, loopback
+python demo/satellite/loop.py --pin 4821     # optional 4/6-digit gate
+```
+
+Auth is off by default: the server binds loopback, so a login form buys
+almost nothing and costs friction. `--pin` adds a gate when you want one, and
+binding a non-loopback `--host` without a PIN is refused outright.
+
+**`mode` is the dial between this and the board.** Both render the same kind
+of thing; they differ in who chooses. The board's surface is fixed ahead of
+time by a stage config and the user moves through it; here the agent chooses
+per turn. Reach for the board when the artifact outlives the conversation and
+needs versions and review; reach for this when the conversation is the work.
 
 Use the board for versioned, reviewable, long-lived artifacts. Use this for
 conversation.

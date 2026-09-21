@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Satellite</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="gate">
+  <div class="brand">Satellite</div>
+  <input id="pin" inputmode="numeric" autocomplete="one-time-code"
+         maxlength="6" autofocus aria-label="PIN">
+  <div class="err" id="err"></div>
+</div>
+<script>
+const pin = document.getElementById("pin");
+const err = document.getElementById("err");
+let fails = 0;
+
+pin.addEventListener("input", () => {
+  pin.value = pin.value.replace(/\D/g, "");
+  if (pin.value.length === 4 || pin.value.length === 6) submit();
+});
+
+async function submit() {
+  const r = await fetch("/gate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin: pin.value }),
+  });
+  if (r.ok) { location.href = "/"; return; }
+  fails += 1;
+  pin.classList.add("bad");
+  err.textContent = r.status === 429
+    ? "Too many attempts. Wait a moment."
+    : (fails >= 2 ? "Check the PIN printed in your terminal." : "Incorrect.");
+  setTimeout(() => pin.classList.remove("bad"), 320);
+  pin.value = "";
+  pin.focus();
+}
+</script>
+</body>
+</html>

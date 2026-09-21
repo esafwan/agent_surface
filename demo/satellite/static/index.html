@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Satellite · poem</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="progress"></div>
+
+<div class="wrap">
+  <div class="rail">
+    <span>Satellite · poem</span>
+    <span class="state"><span class="dot idle" id="dot"></span><span id="statelabel">idle</span></span>
+  </div>
+
+  <p class="ask" id="ask">…</p>
+  <div class="shimmer" id="shimmer" hidden></div>
+
+  <div class="draft empty" id="draft">(no poem yet)</div>
+  <div class="meta" id="meta" hidden></div>
+
+  <div class="stale-bar" id="stalebar">
+    <span id="stalelabel"></span>
+    <button id="backtocurrent">Back to current</button>
+  </div>
+
+  <details class="history" id="history" hidden>
+    <summary id="histsummary"></summary>
+    <div id="histrows"></div>
+  </details>
+</div>
+
+<div class="dock" id="dock">
+  <div class="dock-inner">
+    <div class="controls" id="controls"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
