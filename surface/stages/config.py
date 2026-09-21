@@ -28,6 +28,7 @@ class Stage:
         self.approval_required: bool = data.get("approval_required", False)
         self.generation: Optional[Dict[str, Any]] = data.get("generation")
         self.form_schema: Optional[Dict[str, Any]] = data.get("form_schema")
+        self.board_view: Optional[str] = data.get("board_view")
         self.raw: Dict[str, Any] = data
 
     def is_action_allowed(self, action: str) -> bool:
@@ -42,12 +43,13 @@ class Stage:
 
 
 class StageConfig:
-    VALID_ARTIFACT_TYPES = {"text", "image", "video", "audio", "form", "file", "diff"}
+    VALID_ARTIFACT_TYPES = {"text", "image", "video", "audio", "form", "file", "diff", "task"}
     VALID_ACTIONS = {
         "create", "revise", "regenerate", "select_version", "edit",
         "approve", "reopen", "cancel", "lock", "unlock",
         "bulk_regenerate", "message"
     }
+    VALID_BOARD_VIEWS = {"columns"}
 
     def __init__(self, data: Dict[str, Any]):
         self.raw: Dict[str, Any] = data
@@ -116,6 +118,18 @@ class StageConfig:
             # Validate form_schema if present
             if stage.form_schema is not None:
                 self._validate_form_schema(stage_id, stage.form_schema)
+
+            # Validate board_view if present
+            if stage.board_view is not None:
+                if not isinstance(stage.board_view, str):
+                    raise StageValidationError(
+                        f"Stage '{stage_id}' board_view must be a string"
+                    )
+                if stage.board_view not in self.VALID_BOARD_VIEWS:
+                    raise StageValidationError(
+                        f"Stage '{stage_id}' has invalid board_view: '{stage.board_view}' "
+                        f"(valid values: {', '.join(sorted(self.VALID_BOARD_VIEWS))})"
+                    )
 
         # Validate DAG (Dependency Cycle Detection)
         self._validate_dag()

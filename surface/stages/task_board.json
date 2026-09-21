@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "id": "task_board",
+  "title": "Agent Task Board",
+  "stages": [
+    {
+      "id": "tasks",
+      "artifact_type": "task",
+      "allowed_actions": ["approve", "reopen"],
+      "board_view": "columns"
+    }
+  ]
+}

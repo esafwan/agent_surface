@@ -376,6 +376,83 @@ input:disabled, textarea:disabled, select:disabled {
 label.check { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-body); }
 label.check input { width: auto; }
 
+/* --- column layout for task board ---------------------------------------- */
+.columns-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--s4);
+  padding: var(--s2) 0;
+}
+
+.column {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s3);
+  display: flex;
+  flex-direction: column;
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s4);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+}
+
+.column-title {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.column-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 var(--s2);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  background: var(--bg);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+}
+
+.column .card {
+  margin: 0 0 var(--s3);
+  padding: var(--s3);
+  background: var(--bg-raised);
+  flex: 0 0 auto;
+}
+
+.column .card:last-child {
+  margin-bottom: 0;
+}
+
+.column .card .card-head {
+  margin-bottom: var(--s2);
+}
+
+.column .card .card-title {
+  font-size: var(--fs-body);
+}
+
+.column .card .card-meta {
+  display: none;
+}
+
+.column .card .controls {
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+}
+
 @media (max-width: 520px) {
   .wrap { padding: var(--s5) var(--s4) var(--s7); }
   .card { padding: var(--s4); }

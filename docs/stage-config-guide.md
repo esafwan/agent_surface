@@ -28,6 +28,7 @@ A stage config is a JSON document that describes a workflow pipeline. It tells t
 - `document_review.json` — Document sections with generated findings
 - `diff_review.json` — Code/file diff approval
 - `generic_media_pipeline.json` — Prompts → images → videos
+- `task_board.json` — Agent-decomposed work: read-only progress tracking with status columns
 
 **Create a custom stage config only when:**
 - Your pipeline has a different structure or stage order
@@ -85,6 +86,7 @@ Each object in the `stages` array MUST have an `id` and MAY have:
   "depends_on": ["screenplay"],
   "allowed_actions": ["edit", "revise", "approve"],
   "approval_required": true,
+  "board_view": "columns",
   "generation": { "provider": "...", "max_parallel": 2 },
   "form_schema": { /* JSON Schema object */ }
 }
@@ -100,10 +102,11 @@ Each object in the `stages` array MUST have an `id` and MAY have:
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `artifact_type` | string (enum) | `"text"` | Valid values: `"text"`, `"image"`, `"video"`, `"audio"`, `"form"`, `"file"`, `"diff"`. Determines the board renderer and version content type. |
+| `artifact_type` | string (enum) | `"text"` | Valid values: `"text"`, `"image"`, `"video"`, `"audio"`, `"form"`, `"file"`, `"diff"`, `"task"`. Determines the board renderer and version content type. |
 | `depends_on` | array of strings | `[]` | List of stage IDs this stage depends on. Each ID MUST reference an existing stage. No cycles allowed. |
 | `allowed_actions` | array of strings | `[]` | User-triggerable actions. Valid values below. |
 | `approval_required` | boolean | `false` | If `true`, this stage MUST be approved before board completion. |
+| `board_view` | string | none | Optional board rendering mode. Valid values: `"columns"`. When set to `"columns"`, artifacts are rendered grouped by status in columns instead of a flat list. |
 | `generation` | object | none | Configuration for async job generation. Only relevant if stage has `regenerate` or `bulk_regenerate` actions. |
 | `form_schema` | object | none | JSON Schema defining a form for artifact type `"form"`. Only used if `artifact_type` is `"form"`. |
 
@@ -111,7 +114,7 @@ Each object in the `stages` array MUST have an `id` and MAY have:
 
 ### 2.3 Valid Artifact Types
 
-Defined in `config.py`: `VALID_ARTIFACT_TYPES = {"text", "image", "video", "audio", "form", "file", "diff"}`
+Defined in `config.py`: `VALID_ARTIFACT_TYPES = {"text", "image", "video", "audio", "form", "file", "diff", "task"}`
 
 | Type | Use Case | Example |
 |------|----------|---------|
@@ -122,6 +125,7 @@ Defined in `config.py`: `VALID_ARTIFACT_TYPES = {"text", "image", "video", "audi
 | `form` | Structured input | Questionnaires, configuration forms (requires `form_schema`) |
 | `file` | Generic files | Documents, archives, exports |
 | `diff` | Code/file diffs | Git diffs, change sets |
+| `task` | Progress-tracked work items | Decomposed sub-tasks with status tracking (typically used with `board_view: "columns"`) |
 
 ---
 
@@ -470,7 +474,7 @@ StageValidationError: Duplicate stage id: 'work'
 StageValidationError: Stage 'work' has invalid artifact_type: 'hologram'
 ```
 
-**Valid types:** `text`, `image`, `video`, `audio`, `form`, `file`, `diff`
+**Valid types:** `text`, `image`, `video`, `audio`, `form`, `file`, `diff`, `task`
 
 ---
 
@@ -862,6 +866,15 @@ changes (diff artifact)
 prompts → images → videos
 ```
 - Like movie but simpler; good starting point for custom media workflows.
+
+### `task_board.json` (1 stage, read-only progress tracking)
+```
+tasks (task artifacts, status-column layout)
+```
+- **Single stage for progress tracking:** Displays task artifacts grouped by status in columns (Planned, In Progress, Needs Approval, Done, Failed, Cancelled).
+- **Read-only for end-users:** Only `approve` and `reopen` actions are allowed. Workers create and update tasks via the store API using task artifacts.
+- **Perfect for agent decomposition:** When a parent agent breaks a task into sub-tasks (or hands work to sub-agents), the task board shows the decomposition and its live status. The user can approve tasks in the "Needs Approval" column; no edit/revise/message controls appear.
+- **No dependencies:** This is a standalone, single-stage preset. Task artifacts carry their own `status` field, which determines their column placement.
 
 ---
 

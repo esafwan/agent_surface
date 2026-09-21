@@ -170,6 +170,68 @@ def test_json_schema_forms_validation():
     assert "aspect_ratio" in stage.form_schema["properties"]
 
 
+def test_board_view_field():
+    """Verify board_view field parsing and validation."""
+    # Valid board_view with columns
+    config = StageConfig({
+        "id": "task_board",
+        "stages": [
+            {
+                "id": "tasks",
+                "artifact_type": "text",
+                "allowed_actions": ["approve"],
+                "board_view": "columns"
+            }
+        ]
+    })
+    stage = config.get_stage("tasks")
+    assert stage.board_view == "columns"
+
+    # Missing board_view (optional, should be None)
+    config_no_view = StageConfig({
+        "id": "standard",
+        "stages": [
+            {
+                "id": "review",
+                "artifact_type": "text",
+                "allowed_actions": ["approve"]
+            }
+        ]
+    })
+    stage_no_view = config_no_view.get_stage("review")
+    assert stage_no_view.board_view is None
+
+    # Invalid board_view value
+    with pytest.raises(StageValidationError):
+        StageConfig({
+            "id": "bad_view",
+            "stages": [
+                {
+                    "id": "tasks",
+                    "artifact_type": "text",
+                    "allowed_actions": ["approve"],
+                    "board_view": "invalid_view"
+                }
+            ]
+        })
+
+
+def test_task_artifact_type():
+    """Verify task artifact type is valid."""
+    config = StageConfig({
+        "id": "task_board",
+        "stages": [
+            {
+                "id": "tasks",
+                "artifact_type": "task",
+                "allowed_actions": ["approve", "reopen"]
+            }
+        ]
+    })
+    stage = config.get_stage("tasks")
+    assert stage.artifact_type == "task"
+
+
 def test_invalid_configs():
     """Test various invalid configuration schema errors."""
     # Missing ID
