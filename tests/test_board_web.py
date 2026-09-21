@@ -638,3 +638,72 @@ def test_diff_only_works_with_text_content(poem_store, client):
     )
     assert res.status_code == 400
     assert "only supports text content" in res.json()["error"]
+
+
+# =============================================================================
+# Dependency graph endpoint (T5)
+# =============================================================================
+
+
+def test_graph_no_dependencies_renders_single_node(client, poem_store):
+    res = client.get("/api/graph/poem_001")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["artifact_id"] == "poem_001"
+    assert body["has_dependencies"] is False
+    assert body["mermaid"].startswith("graph TD")
+    assert "A Poem" in body["mermaid"]
+
+
+def test_graph_unknown_artifact_returns_404(client):
+    res = client.get("/api/graph/does_not_exist")
+    assert res.status_code == 404
+
+
+def test_graph_includes_upstream_and_downstream_with_status_styling(poem_store, poem_config):
+    from surface.board_web import create_app
+
+    poem_store.create_artifact(id="poem_up", stage="poem", title="Upstream Poem", status="approved")
+    poem_store.create_artifact(id="poem_down", stage="poem", title="Downstream Poem", status="failed")
+    poem_store.add_dependency(upstream_artifact_id="poem_up", downstream_artifact_id="poem_001")
+    poem_store.add_dependency(upstream_artifact_id="poem_001", downstream_artifact_id="poem_down")
+
+    test_client = TestClient(create_app(poem_store, poem_config))
+    res = test_client.get("/api/graph/poem_001")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["has_dependencies"] is True
+
+    mermaid = body["mermaid"]
+    assert "Upstream Poem" in mermaid
+    assert "Downstream Poem" in mermaid
+    assert "-->" in mermaid
+    # Status-based styling: approved is green, failed is red.
+    assert "fill:#2e7d32" in mermaid
+    assert "fill:#c62828" in mermaid
+    # The center artifact gets its own distinct style.
+    assert "fill:#1565c0" in mermaid
+
+
+def test_graph_locked_neighbor_gets_padlock_label(poem_store, poem_config):
+    from surface.board_web import create_app
+
+    poem_store.create_artifact(
+        id="poem_locked", stage="poem", title="Locked Poem", status="draft", locked=True
+    )
+    poem_store.add_dependency(upstream_artifact_id="poem_locked", downstream_artifact_id="poem_001")
+
+    test_client = TestClient(create_app(poem_store, poem_config))
+    res = test_client.get("/api/graph/poem_001")
+    body = res.json()
+    assert "\U0001F512" in body["mermaid"]
+    assert "Locked Poem" in body["mermaid"]
+
+
+def test_graph_requires_auth_when_token_set(poem_store, poem_config):
+    from surface.board_web import create_app
+
+    token = "secret-token"
+    authed_client = TestClient(create_app(poem_store, poem_config, token=token))
+    res = authed_client.get("/api/graph/poem_001")
+    assert res.status_code == 401
