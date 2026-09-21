@@ -58,8 +58,8 @@ By default the supervisor+poller loop runs **unbounded**, until interrupted with
 
 The token is the password for HTTP **basic auth**, not a bearer token: log in
 with username `surface` and the token as the password. Note the token lives
-beside the **db**, so with `--db demo/x/state.sqlite3` it is at
-`demo/x/run/token`, not `.surface-board/run/token`.
+beside the **db**, so with `--db examples/x/state.sqlite3` it is at
+`examples/x/run/token`, not `.surface-board/run/token`.
 
 ### Check Project Status
 
@@ -90,7 +90,7 @@ happen. Nothing writes new content. To put a real agent in the loop:
 2. **Be the worker yourself** -- claim events with `surface inbox next`,
    write versions, `surface inbox ack`. Requires the board running *without*
    the supervisor, which also has no CLI flag (`--no-board` is the inverse);
-   call `build_board()` directly. See `demo/poem/board_only.py`.
+   call `build_board()` directly. See `examples/02-agent-as-worker/board_only.py`.
 
 **Whichever you choose, a worker must be listening.** An event with no worker
 sits `pending` indefinitely and the board shows nothing -- see the warning
@@ -109,7 +109,7 @@ already exist; creating one requires the Python API:
 
 ```python
 from surface.store import Store
-Store("demo/x/state.sqlite3").create_artifact(
+Store("examples/x/state.sqlite3").create_artifact(
     id="poem_1", stage="poem", title="Poem", status="draft"
 )
 ```
@@ -450,15 +450,15 @@ is upconverted, so an older prompt never becomes wrong.
 `surface render` / `wait` / `answer` is this API: `render` persists a stage
 config + data as a durable handle, `wait` polls it bounded, `answer` closes
 the round-trip. It ships with **no renderer**, so pair it with a thin UI.
-`demo/surface/loop.py` is a working reference (FastAPI + three static
+`examples/04-live-surface/loop.py` is a working reference (FastAPI + three static
 files + a `claude -p` subprocess as the agent) that records every turn
 through `render`/`answer`, giving a durable transcript without the queue.
 
 Run it:
 
 ```bash
-python demo/surface/loop.py                # no auth, loopback
-python demo/surface/loop.py --pin 4821     # optional 4/6-digit gate
+python examples/04-live-surface/loop.py                # no auth, loopback
+python examples/04-live-surface/loop.py --pin 4821     # optional 4/6-digit gate
 ```
 
 Auth is off by default: the server binds loopback, so a login form buys
@@ -603,12 +603,12 @@ When delegating to a sub-agent:
 - **`--worker-command` CLI flag** -- a custom worker subprocess can only be
   supplied via `serve(worker_command=[...])` in Python
 - **A board-without-supervisor mode** -- needed for agent-as-worker; call
-  `build_board()` directly (`demo/poem/board_only.py`)
+  `build_board()` directly (`examples/02-agent-as-worker/board_only.py`)
 - **`surface store create`** -- artifacts can only be created via the Python API
 - **Any queued/working indicator in the board** -- a pending event is
   indistinguishable from a dead button (see "Queued Actions Are Invisible")
 - **A renderer for `render`/`wait`/`answer`** -- the handle API exists with
-  nothing drawing it (`demo/surface/loop.py` is a reference implementation)
+  nothing drawing it (`examples/04-live-surface/loop.py` is a reference implementation)
 
 ---
 
@@ -703,6 +703,9 @@ surface store set-status shots_1 approved
 
 ## See Also
 
+- `examples/` — one runnable, self-contained example per pattern in this
+  file (board basics, agent-as-worker, the Q&A convenience mode, the live
+  surface); start with `examples/README.md`
 - `docs/SPEC.md` — full specification and architectural details
 - `ongoing/phase-0-build/PLAN.md` — build modules and testing strategy
 - `surface/stages/movie.json` — reference stage config

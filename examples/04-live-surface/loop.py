@@ -17,9 +17,20 @@ Agent contract (strict JSON, nothing else):
 Legacy `{"actions": ["approve","revise"]}` is still accepted and normalized
 into a buttons control, so an older prompt never becomes wrong.
 
+This file's default task is a poem-writing agent, matching the examples
+elsewhere in this repo -- but the loop itself is generic. Everything poem-
+specific lives in one string, `DEFAULT_TASK`, below; swap it for any other
+task via `--task` / `--task-file` without touching the loop, the schema, the
+normalizer, or the renderer.
+
 Run:
-    python demo/surface/loop.py                 # no auth, loopback
-    python demo/surface/loop.py --pin 1234      # optional 4/6-digit gate
+    python examples/04-live-surface/loop.py                  # the poem demo
+    python examples/04-live-surface/loop.py --pin 1234        # optional gate
+    python examples/04-live-surface/loop.py \\
+        --title "Recipe agent" --db recipes.sqlite3 \\
+        --task 'Write recipes on request. Use mode "doc" with a "prose"
+                block for the method and a "table" block for ingredients.
+                Offer buttons ["Approve","Revise"].'
 """
 
 import argparse
@@ -42,16 +53,29 @@ from starlette.concurrency import run_in_threadpool
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 STATIC = HERE / "static"
-DB = str(HERE / "state.sqlite3")
 TURN_FILE = HERE / "turn.json"
-PY = str(ROOT / ".venv/bin/python")
+_venv_python = ROOT / ".venv" / "bin" / "python"
+PY = str(_venv_python) if _venv_python.exists() else sys.executable
+
+# Everything below the line marked TASK is what makes this a poem agent
+# specifically. Nothing above that line is poem-specific: change --task
+# and this becomes a recipe agent, a bug-triage agent, whatever.
+DEFAULT_TASK = """Write poems on request. Use mode "doc" with a single
+"verse" block holding the FULL poem with real line breaks. Offer buttons
+["Approve","Revise"]."""
+DEFAULT_ASK = "What do you want me to write?"
+DEFAULT_PLACEHOLDER = "e.g. a love poem"
+
+# Set by main() from CLI args; module-level so the request handlers (which
+# take no args of their own) can read them.
+DB = str(HERE / "state.sqlite3")
 MODEL = "claude-haiku-4-5-20251001"
 
 MAX_CONTROLS = 3
 MAX_ROWS = 50
 MAX_COLS = 6
 
-SYSTEM = """You are an agent driving a small UI. You choose the surface.
+PROTOCOL = """You are an agent driving a small UI. You choose the surface.
 
 Reply with ONLY a JSON object, no prose and no code fence:
 {"mode": <"doc" | "chat" | "form">,
@@ -83,16 +107,18 @@ Controls you may emit (at most 3, and prefer 2):
 `table` is read-only output, never an input. A free-text control is always
 added for you if you omit one, so the user is never stuck.
 
-Rules:
+Rules that hold regardless of task:
 - The user's first message IS the request. Produce the thing immediately.
-  Never stall with a clarifying question -- pick an interpretation and write.
+  Never stall with a clarifying question -- pick an interpretation and act.
 - Every response after that first user message MUST carry real content in
   blocks. Blocks are empty only before the user has said anything at all.
-- For a poem use mode "doc" with a single "verse" block holding the FULL
-  poem with real line breaks, and offer buttons ["Approve","Revise"].
-- On a revise request, rewrite properly -- do not return the previous text
-  unchanged.
+- On a revise/change request, rewrite properly -- do not return the
+  previous content unchanged.
 - When the user approves, set done true and keep the final content."""
+
+# TASK -- everything above this line is the fixed protocol; everything
+# below is what --task / --task-file replace. See DEFAULT_TASK above.
+TASK = DEFAULT_TASK  # overwritten by main() from --task / --task-file
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +130,8 @@ def call_agent(history: List[Dict[str, str]]) -> Dict[str, Any]:
     a renderable response rather than killing the session (the model is small
     and does occasionally break contract)."""
     convo = "\n".join(f"{h['role'].upper()}: {h['text']}" for h in history)
-    prompt = f"{SYSTEM}\n\nConversation so far:\n{convo}\n\nRespond with the JSON object now."
+    system = f"{PROTOCOL}\n\n{TASK}"
+    prompt = f"{system}\n\nConversation so far:\n{convo}\n\nRespond with the JSON object now."
     try:
         proc = subprocess.run(
             ["claude", "-p", prompt, "--output-format", "json", "--model", MODEL],
@@ -340,9 +367,9 @@ def fresh_session() -> Dict[str, Any]:
         "history": [],
         "handle": None,
         "response": {"mode": "doc", "blocks": [], "draft": None,
-                     "ask": "What do you want me to write?",
+                     "ask": OPENING_ASK,
                      "controls": [{"type": "text", "id": "note", "label": "",
-                                   "placeholder": "e.g. a love poem"}],
+                                   "placeholder": OPENING_PLACEHOLDER}],
                      "done": False, "malformed": False},
         "versions": [],  # [{"n": 1, "draft": str, "note": str, "at": float}]
         "inflight": False,
@@ -350,6 +377,9 @@ def fresh_session() -> Dict[str, Any]:
         "turns": 0,
     }
 
+
+OPENING_ASK = DEFAULT_ASK              # overwritten by main() from --ask
+OPENING_PLACEHOLDER = DEFAULT_PLACEHOLDER  # overwritten by main() from --placeholder
 
 SESSION: Dict[str, Any] = fresh_session()
 
@@ -483,11 +513,21 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
 def main() -> None:
-    global PIN
+    global PIN, DB, MODEL, TASK, OPENING_ASK, OPENING_PLACEHOLDER, SESSION
     parser = argparse.ArgumentParser(description="Live agent surface")
     parser.add_argument("--pin", help="Optional 4- or 6-digit gate (default: no auth)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7872)
+    parser.add_argument("--db", help="Path to the SQLite interaction store "
+                        "(default: state.sqlite3 next to this file)")
+    parser.add_argument("--model", default=MODEL, help="claude -p --model to call")
+    parser.add_argument("--task", help="Task instructions, replacing the poem "
+                        "default (see DEFAULT_TASK in this file)")
+    parser.add_argument("--task-file", help="Path to a file holding --task text")
+    parser.add_argument("--ask", default=DEFAULT_ASK,
+                        help="Opening question shown before the first turn")
+    parser.add_argument("--placeholder", default=DEFAULT_PLACEHOLDER,
+                        help="Opening input placeholder")
     args = parser.parse_args()
 
     if args.pin is not None:
@@ -498,6 +538,23 @@ def main() -> None:
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
     if not loopback and PIN is None:
         parser.error(f"refusing to bind {args.host} without --pin")
+
+    if args.task and args.task_file:
+        parser.error("pass either --task or --task-file, not both")
+    if args.task_file:
+        TASK = Path(args.task_file).read_text().strip()
+    elif args.task:
+        TASK = args.task
+
+    if args.db:
+        DB = args.db
+    MODEL = args.model
+    OPENING_ASK = args.ask
+    OPENING_PLACEHOLDER = args.placeholder
+    # The module-level SESSION was built at import time from the defaults;
+    # rebuild it now that --ask/--placeholder may have overridden them.
+    SESSION.clear()
+    SESSION.update(fresh_session())
 
     # The PIN gates the browser, not the machine. The session cookie is signed
     # with a per-process secret (restart = everyone logged out), and the app is

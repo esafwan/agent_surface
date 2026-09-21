@@ -22,7 +22,9 @@ dist/
 # Browser testing artifacts
 .playwright-mcp/
 
-# Demo runtime artifacts
-demo/**/*.log
-demo/**/interactions/
-demo/**/turn.json
+# Example runtime artifacts (each example writes its own store/logs when run)
+examples/**/*.log
+examples/**/interactions/
+examples/**/turn.json
+examples/**/question.json
+examples/**/run/

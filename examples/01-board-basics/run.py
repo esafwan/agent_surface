@@ -1,24 +1,42 @@
-"""
-Full end-to-end demo of Agent Surface Board.
-Movie pipeline: Script → Shots → Keyframes (mock image gen)
+"""Board basics, end to end: the movie pipeline (script -> shots -> keyframes).
 
-This script acts as both:
-1. The "board UI" (injecting events into the inbox)
-2. The "worker loop" (claiming + processing events with the reference worker)
+Demonstrates the three patterns named in SKILL.md's "Preferred Patterns":
+
+  STEP 2-3   Pattern 1: Edit -> Approve Loop
+  STEP 7-8   Pattern 2: Async Image Generation
+  STEP 5     Pattern 3: Stale Propagation
+
+This script plays both halves that a real deployment splits across a browser
+and a worker process: it enqueues events the way board button-clicks would,
+then drains them the way `surface serve`'s supervisor would (via the same
+`surface.worker.handle_event` the reference worker uses). Reading STEP 5 is
+the fastest way to see why "stale, never destroy" (SPEC principle 8) matters:
+revising the script does not touch the shots or keyframes artifacts, it just
+flags them -- their old, now-mismatched versions are still sitting there,
+inspectable, until a human decides what to do about it.
+
+Run:
+    python examples/01-board-basics/run.py
 """
-import sys, json
-sys.path.insert(0, '/Users/safwan/Code/Experiments/agent_surface')
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 from surface.store import Store
 from surface.stages.config import load_preset
 from surface.worker import handle_event
 
-DB = "/Users/safwan/Code/Experiments/agent_surface/.surface-board/state.sqlite3"
+DB = str(Path(__file__).resolve().parent / "board.sqlite3")
 store = Store(DB)
 stage_cfg = load_preset("movie")
 
+
 def section(title):
     print(f"\n{'='*60}\n  {title}\n{'='*60}")
+
 
 def show_artifact(art_id):
     a = store.get_artifact(art_id)
@@ -32,24 +50,25 @@ def show_artifact(art_id):
             preview = (v.get('content') or '')[:100].replace('\n', ' ')
             print(f"              v{v['n']}: \"{preview}...\"")
 
+
 def pump_events(label="", max_events=15):
-    """Process all pending events using the reference worker."""
+    """Process all pending events using the reference worker -- this is what
+    `surface serve`'s supervisor does on every loop iteration."""
     processed = 0
     for _ in range(max_events):
         evt = store.claim_next_event(worker_id="demo_worker", lease_seconds=30)
         if not evt:
             break
         art = store.get_artifact(evt.get('artifact_id')) if evt.get('artifact_id') else None
-        # Build the event context the way supervisor does
         ctx_event = {
             "event_id": evt["id"],
             "type": evt["type"],
-            "project_id": evt.get("project_id","demo"),
+            "project_id": evt.get("project_id", "demo"),
             "payload": evt.get("payload", {}),
             "artifact_id": evt.get("artifact_id"),
             "config": stage_cfg.raw,
             "artifact": art,
-            "summary": {}
+            "summary": {},
         }
         result = handle_event(ctx_event, store)
         if result.get('ok'):
@@ -63,6 +82,7 @@ def pump_events(label="", max_events=15):
     if processed == 0:
         print("    (no pending events)")
     return processed
+
 
 # ─────────────────────────────────────────────────────────────────────
 section("STEP 1 — Initialize artifacts & dependency DAG")
@@ -78,7 +98,7 @@ store.add_dependency("shots_001",  "kf_001")      # shots → keyframes
 print("  Artifacts created and DAG wired: script_001 → shots_001 → kf_001")
 
 # ─────────────────────────────────────────────────────────────────────
-section("STEP 2 — Write Script v1 (edit event)")
+section("STEP 2 — Write Script v1 (edit event)  [Pattern 1: Edit → Approve]")
 # ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_V1 = (
@@ -99,13 +119,13 @@ store.enqueue_event(
     type="edit",
     artifact_id="script_001",
     project_id="demo_movie",
-    payload={"content": SCRIPT_V1, "content_type": "text/plain", "note": "First draft"}
+    payload={"content": SCRIPT_V1, "content_type": "text/plain", "note": "First draft"},
 )
 pump_events("script edit v1")
 show_artifact("script_001")
 
 # ─────────────────────────────────────────────────────────────────────
-section("STEP 3 — Approve the Script")
+section("STEP 3 — Approve the Script  [Pattern 1, continued]")
 # ─────────────────────────────────────────────────────────────────────
 
 store.enqueue_event(type="approve", artifact_id="script_001", project_id="demo_movie", payload={})
@@ -134,13 +154,13 @@ store.enqueue_event(
     type="edit",
     artifact_id="shots_001",
     project_id="demo_movie",
-    payload={"content": SHOTS_V1, "content_type": "text/plain", "note": "Initial shot list"}
+    payload={"content": SHOTS_V1, "content_type": "text/plain", "note": "Initial shot list"},
 )
 pump_events("shots edit v1")
 show_artifact("shots_001")
 
 # ─────────────────────────────────────────────────────────────────────
-section("STEP 5 — Revise Script v2 — watch stale propagation!")
+section("STEP 5 — Revise Script v2 — watch stale propagation!  [Pattern 3]")
 # ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_V2 = SCRIPT_V1 + (
@@ -153,7 +173,7 @@ store.enqueue_event(
     type="revise",
     artifact_id="script_001",
     project_id="demo_movie",
-    payload={"content": SCRIPT_V2, "content_type": "text/plain", "note": "Added voice response epilogue"}
+    payload={"content": SCRIPT_V2, "content_type": "text/plain", "note": "Added voice response epilogue"},
 )
 pump_events("script revise v2")
 
@@ -176,7 +196,7 @@ store.enqueue_event(
     type="revise",
     artifact_id="shots_001",
     project_id="demo_movie",
-    payload={"content": SHOTS_V2, "content_type": "text/plain", "note": "Added epilogue shots"}
+    payload={"content": SHOTS_V2, "content_type": "text/plain", "note": "Added epilogue shots"},
 )
 pump_events("shots revise v2")
 store.enqueue_event(type="approve", artifact_id="shots_001", project_id="demo_movie", payload={})
@@ -184,43 +204,42 @@ pump_events("approve shots")
 show_artifact("shots_001")
 
 # ─────────────────────────────────────────────────────────────────────
-section("STEP 7 — Trigger async image generation for keyframes")
+section("STEP 7 — Trigger async image generation for keyframes  [Pattern 2]")
 # ─────────────────────────────────────────────────────────────────────
 
 job = store.create_job(
     artifact_id="kf_001",
     provider="image_default",
     kind="image",
-    request={"prompt": "Abandoned radio station at night, moonlight, oscilloscope glow, 1980s, cinematic 35mm film"}
+    request={"prompt": "Abandoned radio station at night, moonlight, oscilloscope glow, 1980s, cinematic 35mm film"},
 )
 store.set_status("kf_001", "generating")
 print(f"  📤 Job queued: {job['id']} (provider=image_default)")
 
-# Simulate poller completing the job
+# Simulate the poller completing the job (in `surface serve` this happens on
+# a background loop, not inline -- see Pattern 2 in SKILL.md).
 finished_job = store.finish_job(
     job_id=job['id'],
     result={
         "url": "mock://keyframe_radio_night_001.png",
         "content_type": "image/png",
         "width": 1920, "height": 1080,
-        "note": "Mock-generated keyframe — radio station scene"
-    }
+        "note": "Mock-generated keyframe — radio station scene",
+    },
 )
 print(f"  ⚡ Poller: job {job['id']} succeeded")
 
-# The finish_job should emit a job_done event via the store
-# Let's manually enqueue the job_done if not already emitted
 store.enqueue_event(
     type="job_done",
     artifact_id="kf_001",
     project_id="demo_movie",
-    payload={"job_id": job['id'], "result": finished_job.get('result',{})}
+    payload={"job_id": job['id'], "result": finished_job.get('result', {})},
 )
 pump_events("job_done for keyframes")
 show_artifact("kf_001")
 
 # ─────────────────────────────────────────────────────────────────────
-section("STEP 8 — Approve Keyframes")
+section("STEP 8 — Approve Keyframes  [Pattern 2, continued]")
 # ─────────────────────────────────────────────────────────────────────
 
 store.enqueue_event(type="approve", artifact_id="kf_001", project_id="demo_movie", payload={})
@@ -242,3 +261,5 @@ approved_ids = {a['id'] for a in all_artifacts if a['status'] == 'approved'}
 all_required = {"script_001", "shots_001", "kf_001"}
 complete = all_required.issubset(approved_ids)
 print(f"\n  Pipeline complete: {'🎬 YES!' if complete else '🚧 Not yet - missing: ' + str(all_required - approved_ids)}")
+print(f"\n  Store: {DB}")
+print("  Delete board.sqlite3* in this directory to run again from scratch.")
