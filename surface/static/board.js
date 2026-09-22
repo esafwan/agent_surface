@@ -739,28 +739,33 @@ function actionRow(card, opts = {}) {
 // artifacts, where it is one inspection tool among several at the bottom)
 // or inside the "More actions" fold (form artifacts, where it is not part
 // of the primary fill-out-and-submit flow). Returns {row, container}.
-function buildDependenciesControl(card) {
-  const depsRow = el("div", "row");
-  const depsBtn = el("button", null, "Dependencies");
-  const depsContainer = el("div");
-  depsContainer.id = "graph-container-" + card.artifact_id;
-  depsContainer.style.display = "none";
-  depsBtn.onclick = async () => {
-    if (depsContainer.style.display === "none") {
-      depsContainer.style.display = "block";
-      depsContainer.innerHTML = "";
-      const loadingMsg = el("p");
-      loadingMsg.style.color = "var(--fg-muted)";
-      loadingMsg.textContent = "Loading dependency graph...";
-      depsContainer.appendChild(loadingMsg);
-      const graphData = await fetchGraph(card.artifact_id);
-      await renderGraph(depsContainer, graphData);
-    } else {
-      depsContainer.style.display = "none";
-    }
-  };
-  depsRow.appendChild(depsBtn);
-  return { row: depsRow, container: depsContainer };
+// A bordered button read as an action ("do this"); Dependencies is a
+// read-only diagnostic (zero mutation, exception-triggered -- you open it
+// when a status is confusing, not as part of the happy path). The
+// established idiom for that shape in this file is already the fold used
+// by Version history and Prompt & notes: muted text, a rotating caret, no
+// fill, no border. Converting this from button+manual-display-toggle to
+// the same <details class="fold"> keeps exactly one visual rule across the
+// whole card: filled = advances state, bordered button = performs an
+// action, caret = reveals information.
+function buildDependenciesFold(card) {
+  const fold = el("details", "fold");
+  fold.appendChild(el("summary", null, "Dependencies"));
+  const container = el("div");
+  container.id = "graph-container-" + card.artifact_id;
+  let loaded = false;
+  fold.addEventListener("toggle", async () => {
+    if (!fold.open || loaded) return;
+    loaded = true;
+    const loadingMsg = el("p");
+    loadingMsg.style.color = "var(--fg-muted)";
+    loadingMsg.textContent = "Loading dependency graph…";
+    container.appendChild(loadingMsg);
+    const graphData = await fetchGraph(card.artifact_id);
+    await renderGraph(container, graphData);
+  });
+  fold.appendChild(container);
+  return fold;
 }
 
 function buildCard(card, minimal = false) {
@@ -814,9 +819,7 @@ function buildCard(card, minimal = false) {
       }));
       hasMore = true;
     }
-    const deps = buildDependenciesControl(card);
-    moreBody.appendChild(deps.row);
-    moreBody.appendChild(deps.container);
+    moreBody.appendChild(buildDependenciesFold(card));
     hasMore = true;
 
     const prompt = promptFold(card);
@@ -844,6 +847,9 @@ function buildCard(card, minimal = false) {
     if (prompt) box.appendChild(prompt);
     const history = historyFold(card);
     if (history) box.appendChild(history);
+    // Dependencies joins these two as a third peer disclosure -- same
+    // read-only-inspection shape, same muted-caret treatment.
+    box.appendChild(buildDependenciesFold(card));
 
     const controls = el("div", "controls");
     let hasControls = false;
@@ -884,12 +890,6 @@ function buildCard(card, minimal = false) {
     const actions = actionRow(card);
     if (actions) { controls.appendChild(actions); hasControls = true; }
     if (hasControls) box.appendChild(controls);
-
-    // Dependencies: an inspection tool on every artifact type, not a
-    // primary action -- sits below the content's own review controls.
-    const deps = buildDependenciesControl(card);
-    box.appendChild(deps.row);
-    box.appendChild(deps.container);
   } else {
     // Minimal card for column view: only show metadata and actions for "review" status
     const meta = el("p", "card-meta");
