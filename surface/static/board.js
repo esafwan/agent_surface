@@ -491,6 +491,16 @@ function promptFold(card) {
 function historyFold(card) {
   if (card.all_versions.length < 2) return null;
   const canSelect = card.allowed_actions.indexOf("select_version") >= 0;
+  // A count of 2+ is not the same as having anything to DO about it. On a
+  // stage without select_version (e.g. the shipped questionnaire preset)
+  // and with no eligible Compare (Compare only applies to text content,
+  // and only once a version other than the first is selected), this fold
+  // rendered as a bare, unclickable list of dates -- redundant with the
+  // "v2 of 2" metaLine() already prints, and the second-most-prominent
+  // thing on a card that offered nothing to act on.
+  const selectedIdxForGate = card.all_versions.findIndex((v) => v.is_selected);
+  const canCompare = card.content_kind === "text" && selectedIdxForGate > 0;
+  if (!canSelect && !canCompare) return null;
   const fold = el("details", "fold");
   fold.appendChild(el("summary", null, `Version history (${card.all_versions.length})`));
   const body = el("div");
@@ -680,13 +690,17 @@ function composer(card, slot, opts) {
   return box;
 }
 
-function actionRow(card) {
+function actionRow(card, opts = {}) {
+  // On a form card, "Submit answers" is the primary action -- Approve is a
+  // secondary, later step, not something to compete for attention against
+  // the button that actually does what the user came to do.
+  const approvePrimary = opts.approvePrimary !== false;
   const row = el("div", "row");
   const allowed = card.allowed_actions;
   let any = false;
 
   if (allowed.indexOf("approve") >= 0) {
-    const b = el("button", "primary", card.locked ? "Approve (locked)" : "Approve");
+    const b = el("button", approvePrimary ? "primary" : null, card.locked ? "Approve (locked)" : "Approve");
     b.disabled = card.locked;
     if (card.locked) {
       b.dataset.keepDisabled = "1";
@@ -721,6 +735,34 @@ function actionRow(card) {
   return any ? row : null;
 }
 
+// Extracted so it can be placed either directly on the card (non-form
+// artifacts, where it is one inspection tool among several at the bottom)
+// or inside the "More actions" fold (form artifacts, where it is not part
+// of the primary fill-out-and-submit flow). Returns {row, container}.
+function buildDependenciesControl(card) {
+  const depsRow = el("div", "row");
+  const depsBtn = el("button", null, "Dependencies");
+  const depsContainer = el("div");
+  depsContainer.id = "graph-container-" + card.artifact_id;
+  depsContainer.style.display = "none";
+  depsBtn.onclick = async () => {
+    if (depsContainer.style.display === "none") {
+      depsContainer.style.display = "block";
+      depsContainer.innerHTML = "";
+      const loadingMsg = el("p");
+      loadingMsg.style.color = "var(--fg-muted)";
+      loadingMsg.textContent = "Loading dependency graph...";
+      depsContainer.appendChild(loadingMsg);
+      const graphData = await fetchGraph(card.artifact_id);
+      await renderGraph(depsContainer, graphData);
+    } else {
+      depsContainer.style.display = "none";
+    }
+  };
+  depsRow.appendChild(depsBtn);
+  return { row: depsRow, container: depsContainer };
+}
+
 function buildCard(card, minimal = false) {
   const box = el("article", "card" + (card.status === "approved" ? " is-approved" : "") + (card.busy ? " is-busy" : ""));
 
@@ -729,48 +771,74 @@ function buildCard(card, minimal = false) {
   head.appendChild(el("span", "chip-status st-" + card.status, card.status));
   box.appendChild(head);
 
-  if (!minimal) {
+  if (!minimal && card.content_kind === "form") {
+    // Form cards: the user is the AUTHOR, filling something out for the
+    // first time (or re-editing it) -- not a reviewer iterating on a
+    // worker's draft. Everything this board's default layout treats as
+    // primary/prominent (revise, history, deps) belongs to that other
+    // model instead. Submit answers is the one thing the user came to do;
+    // Approve/Reopen are the only other top-level actions; everything
+    // else is real but secondary, tucked under "More actions".
     box.appendChild(metaLine(card));
 
     const banner = queuedBanner(card);
     if (banner) box.appendChild(banner);
 
-    if (card.content_kind === "form") {
-      box.appendChild(formFields(card));
-    } else {
-      box.appendChild(contentBlock(card));
+    box.appendChild(formFields(card));
 
-      // Add a container for diff display (populated when "Compare to previous version" is clicked)
-      const diffContainer = el("div");
-      diffContainer.id = "diff-container-" + card.artifact_id;
-      diffContainer.style.display = "none";
-      box.appendChild(diffContainer);
+    const actions = actionRow(card, { approvePrimary: false });
+    if (actions) box.appendChild(actions);
+
+    const more = el("details", "fold");
+    more.appendChild(el("summary", null, "More actions"));
+    const moreBody = el("div");
+    let hasMore = false;
+
+    if (card.allowed_actions.indexOf("revise") >= 0) {
+      moreBody.appendChild(composer(card, "revise", {
+        label: "Ask the worker to change something",
+        placeholder: "What should change?",
+        button: "Revise",
+        action: "revise",
+        fieldName: "note",
+      }));
+      hasMore = true;
     }
+    if (card.allowed_actions.indexOf("message") >= 0) {
+      moreBody.appendChild(composer(card, "message", {
+        label: "Message the worker about this artifact",
+        placeholder: "Note for the worker…",
+        button: "Send",
+        action: "message",
+        fieldName: "text",
+      }));
+      hasMore = true;
+    }
+    const deps = buildDependenciesControl(card);
+    moreBody.appendChild(deps.row);
+    moreBody.appendChild(deps.container);
+    hasMore = true;
 
-    // Dependencies: renders the artifact's immediate upstream/downstream
-    // neighborhood as a Mermaid graph, through T1's shared render path.
-    const depsRow = el("div", "row");
-    const depsBtn = el("button", null, "Dependencies");
-    const depsContainer = el("div");
-    depsContainer.id = "graph-container-" + card.artifact_id;
-    depsContainer.style.display = "none";
-    depsBtn.onclick = async () => {
-      if (depsContainer.style.display === "none") {
-        depsContainer.style.display = "block";
-        depsContainer.innerHTML = "";
-        const loadingMsg = el("p");
-        loadingMsg.style.color = "var(--fg-muted)";
-        loadingMsg.textContent = "Loading dependency graph...";
-        depsContainer.appendChild(loadingMsg);
-        const graphData = await fetchGraph(card.artifact_id);
-        await renderGraph(depsContainer, graphData);
-      } else {
-        depsContainer.style.display = "none";
-      }
-    };
-    depsRow.appendChild(depsBtn);
-    box.appendChild(depsRow);
-    box.appendChild(depsContainer);
+    const prompt = promptFold(card);
+    if (prompt) { moreBody.appendChild(prompt); hasMore = true; }
+    const history = historyFold(card);
+    if (history) { moreBody.appendChild(history); hasMore = true; }
+
+    more.appendChild(moreBody);
+    if (hasMore) box.appendChild(more);
+  } else if (!minimal) {
+    box.appendChild(metaLine(card));
+
+    const banner = queuedBanner(card);
+    if (banner) box.appendChild(banner);
+
+    box.appendChild(contentBlock(card));
+
+    // Add a container for diff display (populated when "Compare to previous version" is clicked)
+    const diffContainer = el("div");
+    diffContainer.id = "diff-container-" + card.artifact_id;
+    diffContainer.style.display = "none";
+    box.appendChild(diffContainer);
 
     const prompt = promptFold(card);
     if (prompt) box.appendChild(prompt);
@@ -780,7 +848,7 @@ function buildCard(card, minimal = false) {
     const controls = el("div", "controls");
     let hasControls = false;
 
-    if (card.allowed_actions.indexOf("edit") >= 0 && card.content_kind !== "form") {
+    if (card.allowed_actions.indexOf("edit") >= 0) {
       controls.appendChild(composer(card, "edit", {
         label: "Replace content",
         placeholder: "New content for this artifact…",
@@ -816,6 +884,12 @@ function buildCard(card, minimal = false) {
     const actions = actionRow(card);
     if (actions) { controls.appendChild(actions); hasControls = true; }
     if (hasControls) box.appendChild(controls);
+
+    // Dependencies: an inspection tool on every artifact type, not a
+    // primary action -- sits below the content's own review controls.
+    const deps = buildDependenciesControl(card);
+    box.appendChild(deps.row);
+    box.appendChild(deps.container);
   } else {
     // Minimal card for column view: only show metadata and actions for "review" status
     const meta = el("p", "card-meta");
