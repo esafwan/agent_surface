@@ -768,7 +768,92 @@ function buildDependenciesFold(card) {
   return fold;
 }
 
-function buildCard(card, minimal = false) {
+// The one thing every card was missing: a sentence stating what decision
+// is actually being asked of the user. Everything else on a card -- the
+// status chip, the meta line, queued_note, button labels -- describes
+// STATE; none of it frames an OBLIGATION. Deterministic (no agent call per
+// render -- the board has no worker-in-the-loop for this the way
+// examples/04-live-surface does), computed purely from fields already in
+// the card/stage payload. Strict precedence, first match wins.
+//
+// `allowed_actions` is stage-static (Store/DisplayModelBuilder set it from
+// stage_obj, not per-artifact -- board.py:339), so it can only decide WHICH
+// CLAUSE to append, never whether the card is actionable; status decides
+// that. Deliberately does not branch on `approval_required`: movie.json's
+// keyframes/clips/assembly all default it false while completion still
+// requires every one of them approved -- the field lies in a shipped
+// preset, so nothing here trusts it.
+function cardAsk(card, stage, minimal) {
+  if (minimal || (stage && stage.board_view === "columns")) return null;
+
+  const A = card.allowed_actions || [];
+  const has = (a) => A.indexOf(a) >= 0;
+  const settled = (t) => ({ text: t, settled: true });
+  const live = (t) => ({ text: t, settled: false });
+
+  if (card.status === "generating" || card.has_generating_job)
+    return settled("The worker is producing this. Nothing to decide until it lands.");
+
+  // A mutating action is already in flight -- the content on screen is
+  // about to be replaced, so a review ask would be actively wrong advice.
+  const MUTATING = ["revise", "regenerate", "edit", "approve", "reopen", "cancel"];
+  if ((card.queued_event_types || []).some((t) => MUTATING.indexOf(t) >= 0))
+    return settled("Your last action is still in flight — wait for the new version before deciding.");
+
+  if (card.locked) {
+    return has("unlock")
+      ? live("Locked. Unlock it before you can approve it.")
+      : settled("Locked — it can't be changed or approved right now.");
+  }
+
+  if (card.status === "failed") {
+    const opts = [has("regenerate") && "regenerate it", has("reopen") && "reopen it and try again"]
+      .filter(Boolean);
+    return opts.length
+      ? live("This failed. " + opts.join(", or ").replace(/^./, (c) => c.toUpperCase()) + ".")
+      : settled("This failed. Nothing further is expected here.");
+  }
+  if (card.status === "cancelled")
+    return settled("Cancelled." + (has("reopen") ? " Reopen it if you still want it." : ""));
+  if (card.status === "approved")
+    return settled("Approved — nothing to do." + (has("reopen") ? " Reopen it if you've changed your mind." : ""));
+  if (card.status === "stale") {
+    const why = card.stale_reason ? ": " + card.stale_reason : "";
+    return live("An upstream change landed after this was written" + why + ". Re-check it before approving.");
+  }
+
+  // content_kind is "form" only once form_schema + text content + parsed
+  // fields all line up (see _artifact_payload); a freshly-created form
+  // artifact with no content yet comes through as "none". Fall back to the
+  // STAGE's artifact_type so it still gets the fill-this-out ask instead
+  // of being told to "read this over" with no fields on screen.
+  const isForm = card.content_kind === "form" || (stage && stage.artifact_type === "form");
+  if (isForm) {
+    return live(card.status === "review"
+      ? "Check these answers, then approve — or change a field and submit again."
+      : "Answer the questions below, then submit them.");
+  }
+
+  if (card.content_kind === "none" && !(card.all_versions || []).length)
+    return settled("Nothing here yet — the worker hasn't produced a first version.");
+
+  const VERB = { text: "Read this over", image: "Look this over", video: "Watch this", audio: "Listen to this" };
+  const verb = VERB[card.content_kind] || "Look this over";
+
+  if (has("approve") && (has("revise") || has("edit")))
+    return live(verb + ", then approve it or say what should change.");
+  if (has("approve") && has("regenerate"))
+    return live(verb + ", then approve it, or regenerate it if it's not right.");
+  if (has("approve") && has("message"))
+    return live(verb + ", then approve it, or send the worker a note.");
+  if (has("approve"))
+    return live(verb + ", then approve it when it's right.");
+  if (has("revise") || has("edit"))
+    return live(verb + ", then say what should change.");
+  return settled(verb + " — there's nothing to action here.");
+}
+
+function buildCard(card, minimal = false, stage = null) {
   const box = el("article", "card" + (card.status === "approved" ? " is-approved" : "") + (card.busy ? " is-busy" : ""));
 
   const head = el("div", "card-head");
@@ -785,6 +870,9 @@ function buildCard(card, minimal = false) {
     // Approve/Reopen are the only other top-level actions; everything
     // else is real but secondary, tucked under "More actions".
     box.appendChild(metaLine(card));
+
+    const ask = cardAsk(card, stage, minimal);
+    if (ask) box.appendChild(el("p", "card-ask" + (ask.settled ? " is-settled" : ""), ask.text));
 
     const banner = queuedBanner(card);
     if (banner) box.appendChild(banner);
@@ -831,6 +919,9 @@ function buildCard(card, minimal = false) {
     if (hasMore) box.appendChild(more);
   } else if (!minimal) {
     box.appendChild(metaLine(card));
+
+    const ask = cardAsk(card, stage, minimal);
+    if (ask) box.appendChild(el("p", "card-ask" + (ask.settled ? " is-settled" : ""), ask.text));
 
     const banner = queuedBanner(card);
     if (banner) box.appendChild(banner);
@@ -951,7 +1042,7 @@ function buildColumnView(stage) {
   stage.artifacts.forEach((card) => {
     const status = card.status || "draft";
     if (columns[status]) {
-      columns[status].appendChild(buildCard(card, true));
+      columns[status].appendChild(buildCard(card, true, stage));
     }
   });
 
@@ -1019,7 +1110,7 @@ function render(next, force) {
     if (stage.board_view === "columns") {
       cards.appendChild(buildColumnView(stage));
     } else {
-      stage.artifacts.forEach((card) => cards.appendChild(buildCard(card)));
+      stage.artifacts.forEach((card) => cards.appendChild(buildCard(card, false, stage)));
     }
   }
 

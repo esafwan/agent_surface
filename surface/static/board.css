@@ -225,6 +225,19 @@ body {
 }
 .card-meta .sep { opacity: .5; margin: 0 6px; }
 
+/* The one line a card was missing: what decision is actually being asked.
+   Deliberately quieter than examples/04-live-surface's 20px .ask -- there
+   it's one ask for the whole page; a board can show N cards, and 20px x N
+   would be a wall of demands, not a UI. Between --fs-sm (meta) and
+   .card-title in weight, no background/border/icon -- a colored banner
+   here would appear on every card and neutralize the queued banner's
+   entire signal value (it earns its color by being rare). */
+.card-ask {
+  font-size: 15px; line-height: var(--lh-tight); font-weight: 500;
+  color: var(--fg); margin: 0 0 var(--s3);
+}
+.card-ask.is-settled { font-weight: 400; color: var(--fg-muted); }
+
 /* The queued banner: the fix for "a queued click looks like a dead button".
    It is a real line of information from the store, not a spinner. */
 .queued-note {
