@@ -67,6 +67,13 @@
     --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
     --shadow-md: 0 2px 10px rgba(0,0,0,.45);
   }
+  :root:not([data-theme="light"]) select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%239E9EAA' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  }
+}
+
+:root[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%239E9EAA' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 :root[data-theme="dark"] {
@@ -334,6 +341,12 @@ details.fold[open] summary::before { content: "▾ "; }
   display: flex; flex-direction: column; gap: var(--s3);
 }
 .row { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
+/* Two standalone action rows stacked directly (e.g. a form's "Submit
+   answers" row immediately followed by the "Dependencies" row) had no
+   rhythm between them beyond whatever their own children happened to
+   contribute -- they read as cramped/misaligned rather than as two
+   distinct actions. */
+.controls + .row, .row + .row { margin-top: var(--s4); }
 .row.stretch > input, .row.stretch > textarea { flex: 1; min-width: 200px; }
 .label {
   font-size: var(--fs-micro); color: var(--fg-muted);
@@ -401,6 +414,17 @@ input[type="text"], input[type="number"], textarea, select {
   width: 100%;
 }
 textarea { resize: vertical; min-height: 68px; white-space: pre-wrap; }
+select {
+  /* The native arrow sat flush against the text with no reserved space,
+     and rendered inconsistently across browsers. A custom chevron with its
+     own right-hand gutter reads cleanly everywhere. */
+  appearance: none;
+  padding-right: calc(var(--s3) + 20px);
+  background-repeat: no-repeat;
+  background-position: right var(--s3) center;
+  background-size: 12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%236B6B76' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
 input:disabled, textarea:disabled, select:disabled {
   background: var(--bg-sunken); color: var(--fg-faint); border-color: var(--border);
 }
