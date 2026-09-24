@@ -443,3 +443,88 @@ def test_reconnect_after_restart_preserves_state(tmp_path):
     assert job_after["kind"] == "test_kind"
     assert job_after["status"] == "queued"
     assert job_after["request"]["param"] == "value"
+
+
+def test_select_version_conflict_is_atomic_across_two_connections(tmp_path):
+    """The check-then-write in select_version must be one SQL statement, not
+    a Python read followed by a separate write -- otherwise two separate
+    OS processes (e.g. the CLI and the board server) sharing one sqlite
+    file can race: both read the same "old" selected_version_id, both pass
+    the Python-level `artifact["selected_version_id"] != expected` check,
+    and the second writer silently clobbers the first with no conflict
+    ever reported. This test drives two independent Store instances (two
+    real sqlite3 connections, simulating two processes) against the same
+    file and confirms the second, stale writer gets a real conflict.
+    """
+    db_path = tmp_path / "state.sqlite3"
+    store_a = Store(str(db_path))
+    store_a.create_artifact(id="art", stage="s", title="T")
+    v1 = store_a.put_version("art", content="v1", select=True)["version_id"]
+    v2 = store_a.put_version("art", content="v2", select=False)["version_id"]
+    v3 = store_a.put_version("art", content="v3", select=False)["version_id"]
+
+    # Two independent connections to the same file, standing in for two
+    # separate OS processes that both read the artifact before either writes.
+    store_b = Store(str(db_path))
+
+    # Both "processes" observe the same starting point: v1 is selected.
+    seen_by_a = store_a.get_artifact("art")["selected_version_id"]
+    seen_by_b = store_b.get_artifact("art")["selected_version_id"]
+    assert seen_by_a == seen_by_b == v1
+
+    # Process A commits its revision first.
+    res_a = store_a.select_version("art", v2, expected_selected_version_id=v1)
+    assert res_a["ok"] is True
+
+    # Process B, unaware A already moved it, tries its own revision against
+    # the same stale expectation. This must be rejected, not silently applied
+    # on top of A's change.
+    res_b = store_b.select_version("art", v3, expected_selected_version_id=v1)
+    assert res_b["ok"] is False
+    assert res_b["error"] == "conflict"
+    assert res_b["current_selected_version_id"] == v2
+
+    # The artifact must still reflect A's write, not B's.
+    final = store_a.get_artifact("art")["selected_version_id"]
+    assert final == v2
+
+
+def test_put_version_with_select_reports_conflict_not_silent_overwrite(tmp_path):
+    """put_version(..., select=True) had no concurrency guard at all before
+    this fix -- a worker creating and auto-selecting a new version could
+    silently stomp a human's concurrent revision. Confirm put_version now
+    honors expected_selected_version_id the same way select_version does,
+    and that the new version is still created (not lost) even when the
+    selection step conflicts.
+    """
+    db_path = tmp_path / "state.sqlite3"
+    store_a = Store(str(db_path))
+    store_a.create_artifact(id="art", stage="s", title="T")
+    v1 = store_a.put_version("art", content="v1", select=True)["version_id"]
+
+    store_b = Store(str(db_path))
+
+    # A human, via process A, selects a different existing version.
+    v2 = store_a.put_version("art", content="v2", select=False)["version_id"]
+    res_a = store_a.select_version("art", v2, expected_selected_version_id=v1)
+    assert res_a["ok"] is True
+
+    # A worker, via process B, still believes v1 is selected and tries to
+    # create-and-select a new version on that stale assumption.
+    res_b = store_b.put_version(
+        "art", content="worker output", select=True,
+        expected_selected_version_id=v1,
+    )
+    assert res_b["ok"] is False
+    assert res_b["error"] == "conflict"
+    assert res_b["current_selected_version_id"] == v2
+    # The version itself must still exist -- only selection was rejected,
+    # not the write. Losing the worker's actual output would be worse than
+    # losing the selection race.
+    assert res_b["version_id"] is not None
+    versions = store_a.list_versions("art")
+    assert any(v["id"] == res_b["version_id"] for v in versions)
+
+    # The artifact must still reflect the human's choice (v2), not the
+    # worker's stale write.
+    assert store_a.get_artifact("art")["selected_version_id"] == v2

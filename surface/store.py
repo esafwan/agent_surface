@@ -167,6 +167,7 @@ class Store:
         source_event_id: Optional[str] = None,
         select: bool = True,
         inputs: Optional[Dict[str, str]] = None,
+        expected_selected_version_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new version for an artifact.
 
@@ -230,7 +231,12 @@ class Store:
                 # If selection is requested, ensure it's selected
                 stale_descendants = []
                 if select and artifact["selected_version_id"] != ver_dict["id"]:
-                    sel_res = self.select_version(artifact_id, ver_dict["id"])
+                    sel_res = self.select_version(
+                        artifact_id, ver_dict["id"],
+                        expected_selected_version_id=expected_selected_version_id,
+                    )
+                    if not sel_res.get("ok", True):
+                        return sel_res
                     stale_descendants = sel_res.get("stale_descendants", [])
                 return {
                     "ok": True,
@@ -303,7 +309,20 @@ class Store:
 
         stale_descendants = []
         if select:
-            sel_res = self.select_version(artifact_id, version_id)
+            sel_res = self.select_version(
+                artifact_id, version_id,
+                expected_selected_version_id=expected_selected_version_id,
+            )
+            if not sel_res.get("ok", True):
+                # The version itself was already created and committed above;
+                # only the "make it current" step lost the race. Report the
+                # conflict; the version exists and the caller can retry the
+                # selection (or accept the version un-selected) rather than
+                # having a create call silently discard a concurrent
+                # revision.
+                sel_res["version_id"] = version_id
+                sel_res["version"] = next_n
+                return sel_res
             stale_descendants = sel_res.get("stale_descendants", [])
 
         return {
@@ -354,24 +373,50 @@ class Store:
         if not version or version["artifact_id"] != artifact_id:
             raise ValueError(f"Version {version_id} invalid for artifact {artifact_id}")
 
-        if expected_selected_version_id is not None:
-            if artifact["selected_version_id"] != expected_selected_version_id:
-                return {
-                    "ok": False,
-                    "error": "conflict",
-                    "current_selected_version_id": artifact["selected_version_id"],
-                }
-
-        # Check if selected_version_id is actually changing
         old_selected = artifact["selected_version_id"]
         now = _now_iso()
 
+        # The conflict check and the write must be one atomic statement, not a
+        # Python-level read (get_artifact above) followed by a separate write.
+        # Two separate statements are only safe within a single Python-level
+        # critical section (this class's @_synchronized lock, which only
+        # guards this one process); a second OS process (the CLI and the
+        # board server are separate processes sharing one sqlite file) can
+        # write between the read and the write here, and the second writer's
+        # UPDATE would silently overwrite the first with no error. Folding
+        # the check into the UPDATE's WHERE clause makes SQLite's own
+        # cross-connection write serialization do the atomicity, not our
+        # Python code.
         stale_descendants = []
         with self.conn:
-            self.conn.execute(
-                "UPDATE artifacts SET selected_version_id = ?, updated_at = ? WHERE id = ?",
-                (version_id, now, artifact_id),
-            )
+            if expected_selected_version_id is not None:
+                # NULL can't be compared with '=', so branch on IS vs = ?.
+                if expected_selected_version_id == "":
+                    where_clause = "id = ? AND selected_version_id IS NULL"
+                    params: tuple = (artifact_id,)
+                else:
+                    where_clause = "id = ? AND selected_version_id = ?"
+                    params = (artifact_id, expected_selected_version_id)
+                cursor = self.conn.execute(
+                    f"UPDATE artifacts SET selected_version_id = ?, updated_at = ? WHERE {where_clause}",
+                    (version_id, now, *params),
+                )
+                if cursor.rowcount == 0:
+                    # Either the artifact vanished (already checked above,
+                    # so not that) or selected_version_id no longer matches
+                    # what the caller expected -- re-read to report the
+                    # actual current value to the caller.
+                    current = self.get_artifact(artifact_id)
+                    return {
+                        "ok": False,
+                        "error": "conflict",
+                        "current_selected_version_id": current["selected_version_id"] if current else None,
+                    }
+            else:
+                self.conn.execute(
+                    "UPDATE artifacts SET selected_version_id = ?, updated_at = ? WHERE id = ?",
+                    (version_id, now, artifact_id),
+                )
 
             # If selected version changed, trigger DAG stale propagation
             if old_selected != version_id:
