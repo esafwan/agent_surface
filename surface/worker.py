@@ -234,6 +234,35 @@ def _handle_regenerate(
     )
 
 
+def _capture_dispatch_inputs_snapshot(store: Store, artifact_id: str) -> Dict[str, str]:
+    """Snapshot, at job-dispatch time, what each upstream's selected version
+    currently is.
+
+    This mirrors `Store.put_version`'s own auto-capture logic (see its
+    docstring: "When `inputs` is omitted, it is auto-captured from the
+    *current* `artifact_dependencies` graph: for every upstream of this
+    artifact, whatever that upstream's `selected_version_id` is right now is
+    recorded.") -- but computed NOW, at dispatch, via the public
+    `get_graph`/`get_artifact` API, so it can be persisted on the job and
+    replayed unchanged at completion time instead of being re-derived from
+    (by-then possibly different) current state.
+
+    Returns an `{upstream_artifact_id: upstream_version_id}` mapping in the
+    exact shape `put_version(..., inputs=...)` expects. Upstreams with no
+    selected version yet are omitted, matching put_version's own behavior.
+    """
+    snapshot: Dict[str, str] = {}
+    graph = store.get_graph(artifact_id)
+    for upstream in graph.get("upstreams", []):
+        up_id = upstream.get("upstream_artifact_id")
+        if not up_id:
+            continue
+        up_artifact = store.get_artifact(up_id)
+        if up_artifact and up_artifact.get("selected_version_id"):
+            snapshot[up_id] = up_artifact["selected_version_id"]
+    return snapshot
+
+
 _JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
 
 
@@ -300,6 +329,17 @@ def _create_generation_job(
 
         # Construct request with artifact's selected version content/prompt
         request = {"note": note, "source_event_id": event_id}
+
+        # Capture, right now (dispatch time), what each upstream's selected
+        # version currently is, and stash it in the job's own request blob
+        # (`request_json`) so the poller can pass it as `put_version(...,
+        # inputs=...)` when the job completes -- instead of put_version
+        # auto-capturing whatever is selected THEN, which may have moved
+        # while the job was in flight. See _capture_dispatch_inputs_snapshot.
+        dispatch_inputs_snapshot = _capture_dispatch_inputs_snapshot(store, artifact_id)
+        if dispatch_inputs_snapshot:
+            request["_dispatch_inputs_snapshot"] = dispatch_inputs_snapshot
+
         if artifact["selected_version_id"]:
             selected_ver = store.get_version(artifact["selected_version_id"])
             if selected_ver:
