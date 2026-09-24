@@ -64,6 +64,7 @@ class ArtifactDisplayCard:
     has_generating_job: bool = False
     stale_reason: Optional[str] = None
     updated_at: str = ""
+    freshness: Optional[Dict[str, Any]] = None
     # --- Unresolved inbox work referencing THIS artifact -------------------
     # The click already landed in the store; nothing visible has changed yet.
     # `pending_event_count` is waiting for a worker to claim it,
@@ -97,6 +98,7 @@ class ArtifactDisplayCard:
             "has_generating_job": self.has_generating_job,
             "stale_reason": self.stale_reason,
             "updated_at": self.updated_at,
+            "freshness": self.freshness,
             "pending_event_count": self.pending_event_count,
             "processing_event_count": self.processing_event_count,
             "queued_event_types": list(self.queued_event_types),
@@ -351,6 +353,7 @@ class DisplayModelBuilder:
             has_generating_job=has_generating_job,
             stale_reason=stale_reason,
             updated_at=artifact.get("updated_at", ""),
+            freshness=freshness,
             pending_event_count=len(pending_events),
             processing_event_count=len(processing_events),
             queued_event_types=[str(e.get("type")) for e in active_events],
