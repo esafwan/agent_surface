@@ -16,6 +16,12 @@ import pytest
 from surface.store import Store
 
 
+def _stale_because_ids(freshness: dict) -> set:
+    """Extract the set of upstream_artifact_id from a stale_because list of
+    {"upstream_artifact_id": ..., "reason": ...} dicts."""
+    return {d["upstream_artifact_id"] for d in freshness["stale_because"]}
+
+
 def _build_random_dag(
     store: Store, num_artifacts: int, seed: int
 ) -> Tuple[List[str], random.Random]:
@@ -116,8 +122,9 @@ def test_upstream_change_makes_downstream_stale():
             assert (
                 freshness["fresh"] is False
             ), f"Trial {trial}: {downstream_id} should be stale after {changed_artifact} changed"
-            assert changed_artifact in freshness["stale_because"] or any(
-                dep_id in freshness["stale_because"] for dep_id in expected_stale
+            stale_ids = _stale_because_ids(freshness)
+            assert changed_artifact in stale_ids or any(
+                dep_id in stale_ids for dep_id in expected_stale
             ), f"Trial {trial}: {downstream_id} stale_because should include {changed_artifact} or intermediate"
 
         # Verify unrelated artifacts are still fresh
@@ -206,7 +213,7 @@ def test_late_job_result_arrives_stale():
     assert freshness["fresh"] is False, (
         "B v2 should be born stale: it recorded A v1 as input but A is now v2"
     )
-    assert "A" in freshness["stale_because"], (
+    assert "A" in _stale_because_ids(freshness), (
         "stale_because should name A as the cause"
     )
 
@@ -271,7 +278,7 @@ def test_stale_because_names_the_right_upstream():
     # B should be stale because of A (direct upstream)
     freshness_B = store.compute_freshness("B")
     assert freshness_B["fresh"] is False
-    assert "A" in freshness_B["stale_because"], (
+    assert "A" in _stale_because_ids(freshness_B), (
         f"B's stale_because should name A, got {freshness_B['stale_because']}"
     )
 
@@ -279,8 +286,45 @@ def test_stale_because_names_the_right_upstream():
     # and transitively because B is stale
     freshness_C = store.compute_freshness("C")
     assert freshness_C["fresh"] is False
-    assert "B" in freshness_C["stale_because"], (
+    assert "B" in _stale_because_ids(freshness_C), (
         f"C's stale_because should name B, got {freshness_C['stale_because']}"
+    )
+
+
+def test_missing_provenance_record_is_not_silently_fresh():
+    """A real dependency with no version_inputs row must not read as fresh.
+
+    Build A -> B. Create A's version normally. Then create B's version via
+    put_version(B, ..., inputs={}) -- an empty explicit inputs mapping,
+    simulating a code path that skipped provenance capture -- even though B
+    really does depend on A (a real artifact_dependencies edge exists).
+    compute_freshness(B) must report NOT fresh, with a "no_record" entry for
+    A, rather than silently treating "nothing recorded" as "known fresh".
+    """
+    store = Store(":memory:")
+
+    store.create_artifact(id="A", stage="test", title="A")
+    store.create_artifact(id="B", stage="test", title="B")
+    store.add_dependency("A", "B")
+
+    store.put_version("A", content="A v1", select=True)
+
+    # Simulate a code path that skipped input capture entirely.
+    store.put_version("B", content="B v1", select=True, inputs={})
+
+    freshness_B = store.compute_freshness("B")
+    assert freshness_B["fresh"] is False, (
+        "B has a real dependency on A but no version_inputs record for it -- "
+        "must not be silently treated as fresh"
+    )
+    matching = [
+        d for d in freshness_B["stale_because"] if d["upstream_artifact_id"] == "A"
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly one stale_because entry for A, got {freshness_B['stale_because']}"
+    )
+    assert matching[0]["reason"] == "no_record", (
+        f"expected reason 'no_record' for A, got {matching[0]}"
     )
 
 

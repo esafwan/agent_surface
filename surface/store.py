@@ -189,6 +189,34 @@ class Store:
         if not artifact:
             raise ValueError(f"Artifact {artifact_id} not found")
 
+        # Validate explicit inputs, if given. Auto-captured inputs (inputs is
+        # None) are always internally consistent since they're read straight
+        # from artifact_dependencies + current selected_version_id, so this
+        # only applies to the explicit-snapshot path.
+        if inputs is not None:
+            cursor = self.conn.cursor()
+            for up_artifact_id, up_version_id in inputs.items():
+                up_artifact = self.get_artifact(up_artifact_id)
+                if not up_artifact:
+                    raise ValueError(
+                        f"inputs: upstream artifact {up_artifact_id!r} does not exist"
+                    )
+                up_version = self.get_version(up_version_id)
+                if not up_version or up_version["artifact_id"] != up_artifact_id:
+                    raise ValueError(
+                        f"inputs: upstream version {up_version_id!r} does not exist or "
+                        f"does not belong to artifact {up_artifact_id!r}"
+                    )
+                cursor.execute(
+                    "SELECT 1 FROM artifact_dependencies WHERE upstream_artifact_id = ? AND downstream_artifact_id = ?",
+                    (up_artifact_id, artifact_id),
+                )
+                if not cursor.fetchone():
+                    raise ValueError(
+                        f"inputs: {up_artifact_id!r} is not a declared dependency of "
+                        f"artifact {artifact_id!r}"
+                    )
+
         # Idempotency check: if source_event_id is provided, check if a version already exists for it
         if source_event_id:
             cursor = self.conn.cursor()
@@ -492,14 +520,29 @@ class Store:
     ) -> Dict[str, Any]:
         """Read-only, computed-on-every-call freshness check.
 
-        An artifact is fresh iff, for every upstream version it was built
-        from (per `version_inputs` on its currently selected version), that
-        upstream artifact's *current* `selected_version_id` still matches
-        the recorded one -- AND that upstream artifact is itself fresh
-        (transitive staleness). Nothing here is stored or cached; it is
-        purely derived from `version_inputs` + `artifacts.selected_version_id`
+        An artifact is fresh iff, for every CURRENT real dependency it has
+        (`artifact_dependencies` naming it as downstream) -- not merely
+        whatever happens to be recorded in `version_inputs` -- there is a
+        `version_inputs` row for that upstream on the selected version, that
+        row's recorded upstream version id still matches the upstream's
+        *current* `selected_version_id`, AND that upstream artifact is
+        itself fresh (transitive staleness). A real dependency with NO
+        `version_inputs` row at all (missing provenance -- e.g. the version
+        predates input capture, or was created with `inputs={}`) is treated
+        as NOT fresh: "no record" is never silently read as "known fresh".
+        An artifact with no current dependencies has nothing to be stale
+        against and stays fresh.
+
+        Nothing here is stored or cached; it is purely derived from
+        `artifact_dependencies` + `version_inputs` + `selected_version_id`
         at call time, so reverting an upstream selection back to a recorded
         version id makes downstream fresh again with no extra bookkeeping.
+
+        `stale_because` is a list of `{"upstream_artifact_id": ..., "reason":
+        "changed" | "no_record"}` dicts -- `"changed"` means a
+        `version_inputs` row exists but no longer matches (directly or
+        transitively); `"no_record"` means no `version_inputs` row exists
+        for a real current dependency at all.
 
         `_visited` guards against runaway recursion; `add_dependency`
         already prevents cycles at the edge level, but this stays defensive.
@@ -523,16 +566,38 @@ class Store:
 
         selected_version_id = row["selected_version_id"]
 
+        # Current real dependency edges -- the source of truth for what
+        # SHOULD have a provenance record, independent of what actually got
+        # recorded in version_inputs.
+        cursor.execute(
+            "SELECT upstream_artifact_id FROM artifact_dependencies WHERE downstream_artifact_id = ?",
+            (artifact_id,),
+        )
+        current_upstream_ids = [r["upstream_artifact_id"] for r in cursor.fetchall()]
+
+        if not current_upstream_ids:
+            return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+
         cursor.execute(
             "SELECT upstream_artifact_id, upstream_version_id FROM version_inputs WHERE version_id = ?",
             (selected_version_id,),
         )
-        input_rows = cursor.fetchall()
+        recorded = {
+            r["upstream_artifact_id"]: r["upstream_version_id"]
+            for r in cursor.fetchall()
+        }
 
-        stale_because: List[str] = []
-        for input_row in input_rows:
-            up_artifact_id = input_row["upstream_artifact_id"]
-            recorded_upstream_version_id = input_row["upstream_version_id"]
+        stale_because: List[Dict[str, str]] = []
+        for up_artifact_id in current_upstream_ids:
+            if up_artifact_id not in recorded:
+                # Real dependency, but no provenance record for it at all --
+                # this is Gap 1: missing record must not read as fresh.
+                stale_because.append(
+                    {"upstream_artifact_id": up_artifact_id, "reason": "no_record"}
+                )
+                continue
+
+            recorded_upstream_version_id = recorded[up_artifact_id]
 
             cursor.execute(
                 "SELECT selected_version_id FROM artifacts WHERE id = ?",
@@ -545,7 +610,9 @@ class Store:
             upstream_freshness = self.compute_freshness(up_artifact_id, _visited=_visited)
 
             if direct_stale or not upstream_freshness["fresh"]:
-                stale_because.append(up_artifact_id)
+                stale_because.append(
+                    {"upstream_artifact_id": up_artifact_id, "reason": "changed"}
+                )
 
         return {
             "artifact_id": artifact_id,

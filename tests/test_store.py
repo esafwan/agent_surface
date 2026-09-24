@@ -149,7 +149,10 @@ def test_dag_stale_propagation_and_cycle_detection():
     # But freshness, computed from version_inputs, correctly reports them
     # as stale (shotlist directly, frame/video transitively).
     assert store.get_artifact("shotlist")["freshness"]["fresh"] is False
-    assert "script" in store.get_artifact("shotlist")["freshness"]["stale_because"]
+    shotlist_stale_because = store.get_artifact("shotlist")["freshness"]["stale_because"]
+    assert any(
+        d["upstream_artifact_id"] == "script" for d in shotlist_stale_because
+    )
     assert store.get_artifact("frame")["freshness"]["fresh"] is False
     assert store.get_artifact("video")["freshness"]["fresh"] is False
 
@@ -384,3 +387,61 @@ def test_store_concurrent_access_from_two_threads_is_safe(tmp_path):
     final = store.list_artifacts()
     assert len(final) == n_creates
     assert {a["id"] for a in final} == set(created_ids)
+
+
+def test_put_version_rejects_nonexistent_upstream_artifact():
+    store = Store(":memory:")
+    store.create_artifact(id="A", stage="test", title="A")
+    store.create_artifact(id="B", stage="test", title="B")
+    store.add_dependency("A", "B")
+    store.put_version("A", content="A v1", select=True)
+
+    with pytest.raises(ValueError, match="does not exist"):
+        store.put_version(
+            "B", content="B v1", inputs={"does_not_exist": "ver_whatever"}
+        )
+
+
+def test_put_version_rejects_nonexistent_upstream_version():
+    store = Store(":memory:")
+    store.create_artifact(id="A", stage="test", title="A")
+    store.create_artifact(id="B", stage="test", title="B")
+    store.add_dependency("A", "B")
+    store.put_version("A", content="A v1", select=True)
+
+    with pytest.raises(ValueError, match="does not exist"):
+        store.put_version("B", content="B v1", inputs={"A": "ver_bogus"})
+
+
+def test_put_version_rejects_version_belonging_to_different_artifact():
+    store = Store(":memory:")
+    store.create_artifact(id="A", stage="test", title="A")
+    store.create_artifact(id="C", stage="test", title="C")
+    store.create_artifact(id="B", stage="test", title="B")
+    store.add_dependency("A", "B")
+    store.add_dependency("C", "B")
+
+    a_v1 = store.put_version("A", content="A v1", select=True)["version_id"]
+
+    # a_v1 belongs to A, not to C -- passing it as C's version must be rejected.
+    with pytest.raises(ValueError, match="does not exist|does not belong"):
+        store.put_version("B", content="B v1", inputs={"C": a_v1})
+
+
+def test_put_version_rejects_artifact_id_that_is_not_a_real_dependency():
+    store = Store(":memory:")
+    store.create_artifact(id="A", stage="test", title="A")
+    store.create_artifact(id="X", stage="test", title="X (unrelated)")
+    store.create_artifact(id="B", stage="test", title="B")
+    store.add_dependency("A", "B")  # B depends on A, NOT on X
+
+    a_v1 = store.put_version("A", content="A v1", select=True)["version_id"]
+    x_v1 = store.put_version("X", content="X v1", select=True)["version_id"]
+
+    with pytest.raises(ValueError, match="not a declared dependency"):
+        store.put_version("B", content="B v1", inputs={"X": x_v1})
+
+    # A real dependency with a valid, if stale, version id is still accepted
+    # (this is exactly the late-job-arrives-stale pattern).
+    result = store.put_version("B", content="B v1", inputs={"A": a_v1})
+    assert result["ok"] is True
