@@ -330,13 +330,20 @@ class DisplayModelBuilder:
             processing_events[0].get("claimed_at") if processing_events else None
         )
 
-        # Populate stale_reason from freshness.stale_because
+        # Populate stale_reason from freshness.stale_because. Each entry is
+        # {"upstream_artifact_id": ..., "reason": "changed" | "no_record"} --
+        # render each with its own reason so "an upstream changed" and "no
+        # provenance record for this upstream" don't look identical.
         stale_reason = None
         freshness = artifact.get("freshness", {})
         if not freshness.get("fresh", True):
             stale_because = freshness.get("stale_because", [])
             if stale_because:
-                stale_reason = f"stale (upstream: {', '.join(stale_because)})"
+                parts = [
+                    f"{entry['upstream_artifact_id']} ({entry['reason']})"
+                    for entry in stale_because
+                ]
+                stale_reason = f"stale (upstream: {', '.join(parts)})"
             else:
                 stale_reason = "stale"
 
