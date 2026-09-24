@@ -294,6 +294,79 @@ class TestDetectNotifications:
         assert result[0]["count"] == 1
         assert "stale" in result[0]["message"]
 
+    def test_detect_stale_does_not_repeat_fire_on_same_artifacts(self):
+        """Verify stale notification fires only once when same artifacts remain stale.
+
+        Regression test for bug where detect_notifications would re-fire the same
+        stale notification every poll because detect_notifications wasn't updating
+        the current_summary["by_status"]["stale"] to reflect the real stale count.
+
+        So when the caller used the current_summary as the baseline for the next poll,
+        the stale count was still 0 (or whatever old value), causing the comparison
+        current_stale > previous_stale to always be true.
+
+        Scenario:
+        1. Initial state: 0 stale artifacts
+        2. First poll: 1 artifact becomes stale -> should NOTIFY (count=1)
+        3. Second poll with SAME state: should NOT notify
+           - Without fix: fires again because baseline is still 0
+           - With fix: does not fire because detect_notifications updates the summary
+        """
+        store = Store(":memory:")
+
+        # Create simple dependency: upstream -> downstream
+        store.create_artifact("upstream", "script", "Upstream", status="draft")
+        store.create_artifact("downstream", "shots", "Downstream", status="review")
+
+        # Create initial versions
+        store.put_version("upstream", content="v1", select=True)
+
+        # Add dependency
+        store.add_dependency("upstream", "downstream")
+
+        # Create downstream version after dependency
+        store.put_version("downstream", content="v1", select=True)
+
+        # Initial state: no stale
+        initial = {
+            "total_artifacts": 2,
+            "by_stage": {"script": 1, "shots": 1},
+            "by_status": {"draft": 1, "review": 1},
+        }
+
+        # Poll 1: Make upstream stale, should notify
+        store.put_version("upstream", content="v2", select=True)
+        current_after_first = {
+            "total_artifacts": 2,
+            "by_stage": {"script": 1, "shots": 1},
+            "by_status": {"draft": 1, "review": 1},
+        }
+        result1 = detect_notifications(store, previous_summary=initial, current_summary=current_after_first)
+        assert len(result1) == 1, "First poll should fire stale notification"
+        assert result1[0]["kind"] == "stale"
+        assert result1[0]["count"] == 1, "Should detect 1 newly stale"
+
+        # The fix: detect_notifications should have updated current_summary["by_status"]["stale"]
+        # to reflect the actual current stale count (1). If it didn't, the value is still missing.
+        assert current_after_first["by_status"].get("stale") == 1, (
+            "detect_notifications should update current_summary["
+            '"by_status"]["stale"] to the real stale count'
+        )
+
+        # Poll 2: No new changes - downstream is still stale
+        # Since current_summary was updated by detect_notifications, the baseline is now correct
+        current_after_second = {
+            "total_artifacts": 2,
+            "by_stage": {"script": 1, "shots": 1},
+            "by_status": {"draft": 1, "review": 1},
+        }
+        result2 = detect_notifications(store, previous_summary=current_after_first, current_summary=current_after_second)
+        assert len(result2) == 0, (
+            "Second poll should NOT notify: no NEW staleness since last baseline. "
+            "Bug: if detect_notifications doesn't update current_summary['by_status']['stale'], "
+            "the baseline stays 0 and 1 > 0 fires every time"
+        )
+
     def test_detect_pending_review_0_to_positive(self):
         """Verify detection of review going from 0 to positive."""
         store = Store(":memory:")
