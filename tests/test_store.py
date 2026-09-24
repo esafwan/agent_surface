@@ -13,7 +13,7 @@ def test_schema_creation_and_initialization():
     cursor.execute("SELECT value FROM runtime WHERE key='schema_version'")
     row = cursor.fetchone()
     assert row is not None
-    assert row[0] == "1"
+    assert row[0] == "2"
 
     # Verify tables exist
     tables = [
@@ -22,6 +22,7 @@ def test_schema_creation_and_initialization():
         "artifacts",
         "versions",
         "artifact_dependencies",
+        "version_inputs",
         "events",
         "jobs",
         "artifact_locks",
@@ -117,7 +118,13 @@ def test_dag_stale_propagation_and_cycle_detection():
     with pytest.raises(ValueError, match="creates a cycle"):
         store.add_dependency("video", "script")
 
-    # Put initial versions on downstream artifacts and approve them
+    # Put an initial script version first so downstream versions have a
+    # baseline upstream version to record provenance against.
+    store.put_version("script", content="Script v1")
+
+    # Put initial versions on downstream artifacts and approve them. Each
+    # one auto-captures its current upstream selected_version_id into
+    # version_inputs at creation time.
     store.put_version("shotlist", content="Shots v1")
     store.set_status("shotlist", "approved")
 
@@ -130,12 +137,21 @@ def test_dag_stale_propagation_and_cycle_detection():
     # Now update selected version on upstream 'script'
     res = store.put_version("script", content="Script v2", select=True)
 
-    # Downstream artifacts must all be marked stale
+    # Downstream artifacts must all be notified (stale_descendants keeps its
+    # old meaning: who got a 'stale' event), but status is a human/worker
+    # decision that staleness propagation never touches.
     assert set(res["stale_descendants"]) == {"shotlist", "frame", "video"}
 
-    assert store.get_artifact("shotlist")["status"] == "stale"
-    assert store.get_artifact("frame")["status"] == "stale"
-    assert store.get_artifact("video")["status"] == "stale"
+    assert store.get_artifact("shotlist")["status"] == "approved"
+    assert store.get_artifact("frame")["status"] == "approved"
+    assert store.get_artifact("video")["status"] == "approved"
+
+    # But freshness, computed from version_inputs, correctly reports them
+    # as stale (shotlist directly, frame/video transitively).
+    assert store.get_artifact("shotlist")["freshness"]["fresh"] is False
+    assert "script" in store.get_artifact("shotlist")["freshness"]["stale_because"]
+    assert store.get_artifact("frame")["freshness"]["fresh"] is False
+    assert store.get_artifact("video")["freshness"]["fresh"] is False
 
     # Versions must be retained
     assert len(store.list_versions("shotlist")) == 1

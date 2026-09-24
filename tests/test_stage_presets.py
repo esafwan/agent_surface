@@ -319,12 +319,119 @@ class TestGenericMediaPipelinePreset:
         assert len(config.stages) == 3
 
 
+class TestProjectKickoffPreset:
+    """Tests for project_kickoff.json preset."""
+
+    def test_project_kickoff_loads_successfully(self):
+        """Verify project_kickoff.json preset loads and validates."""
+        config = load_preset("project_kickoff")
+        assert config.id == "project_kickoff"
+        assert config.title == "Project Kickoff Artifact"
+        assert config.schema_version == "1"
+
+    def test_project_kickoff_stages(self):
+        """Verify project_kickoff stage structure."""
+        config = load_preset("project_kickoff")
+        assert config.stage_order == ["kickoff", "review"]
+        assert len(config.stages) == 2
+
+        kickoff = config.get_stage("kickoff")
+        assert kickoff.artifact_type == "form"
+        assert kickoff.depends_on == []
+        assert kickoff.approval_required is True
+        for action in ("edit", "revise", "approve", "reopen"):
+            assert action in kickoff.allowed_actions
+
+        review = config.get_stage("review")
+        assert review.artifact_type == "text"
+        assert review.depends_on == ["kickoff"]
+        assert review.approval_required is True
+
+    def test_project_kickoff_form_schema_exists(self):
+        """Verify project_kickoff form_schema is present and valid."""
+        config = load_preset("project_kickoff")
+        kickoff = config.get_stage("kickoff")
+        assert kickoff.form_schema is not None
+        assert kickoff.form_schema["type"] == "object"
+        assert "properties" in kickoff.form_schema
+
+    def test_project_kickoff_structural_fields(self):
+        """Verify project_kickoff has array-typed structural fields."""
+        config = load_preset("project_kickoff")
+        kickoff = config.get_stage("kickoff")
+        properties = kickoff.form_schema["properties"]
+
+        # Verify all expected fields are present
+        expected_fields = ["project_name", "audience", "goals", "pages",
+                          "integrations", "priorities", "open_questions",
+                          "timeline", "budget_estimate"]
+        for field in expected_fields:
+            assert field in properties, f"Missing field: {field}"
+
+        # Verify array-typed structural fields
+        goals = properties["goals"]
+        assert goals["type"] == "array", "goals should be an array type"
+        assert "items" in goals, "goals should have items definition"
+        assert goals["items"]["type"] == "object", "goals items should be objects"
+        assert "properties" in goals["items"], "goal items should have properties"
+        assert "goal" in goals["items"]["properties"], "goal items should have goal property"
+        assert "priority" in goals["items"]["properties"], "goal items should have priority property"
+
+        pages = properties["pages"]
+        assert pages["type"] == "array", "pages should be an array type"
+        assert "items" in pages, "pages should have items definition"
+        assert pages["items"]["type"] == "object", "pages items should be objects"
+        assert "name" in pages["items"]["properties"], "page items should have name property"
+
+        integrations = properties["integrations"]
+        assert integrations["type"] == "array", "integrations should be an array type"
+        assert "items" in integrations, "integrations should have items definition"
+        assert integrations["items"]["type"] == "string", "integration items should be strings"
+
+        priorities = properties["priorities"]
+        assert priorities["type"] == "array", "priorities should be an array type"
+        assert "items" in priorities, "priorities should have items definition"
+        assert priorities["items"]["type"] == "string", "priority items should be strings"
+
+        open_questions = properties["open_questions"]
+        assert open_questions["type"] == "array", "open_questions should be an array type"
+        assert "items" in open_questions, "open_questions should have items definition"
+        assert open_questions["items"]["type"] == "object", "question items should be objects"
+        assert "question" in open_questions["items"]["properties"], "question items should have question property"
+        assert "status" in open_questions["items"]["properties"], "question items should have status property"
+
+    def test_project_kickoff_dependencies(self):
+        """Verify project_kickoff dependency structure."""
+        config = load_preset("project_kickoff")
+
+        kickoff = config.get_stage("kickoff")
+        assert kickoff.depends_on == []
+
+        review = config.get_stage("review")
+        assert review.depends_on == ["kickoff"]
+
+    def test_project_kickoff_completion_rule(self):
+        """Verify project_kickoff completion rules."""
+        config = load_preset("project_kickoff")
+        assert set(config.completion["require_approved_stages"]) == {"kickoff", "review"}
+        assert config.is_completed({"kickoff", "review"})
+        # review depends on kickoff, so kickoff alone must not complete it
+        assert not config.is_completed({"kickoff"})
+
+    def test_project_kickoff_no_cycles(self):
+        """Verify project_kickoff has no dependency cycles."""
+        config = load_preset("project_kickoff")
+        # If there were cycles, StageConfig init would raise DependencyCycleError
+        # The fact that we loaded it successfully means no cycles exist
+        assert len(config.stages) == 2
+
+
 class TestAllPresetsIntegration:
     """Integration tests across all presets."""
 
     def test_all_presets_have_required_fields(self):
         """Verify all presets have required top-level fields."""
-        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline"]
+        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline", "project_kickoff"]
 
         for name in preset_names:
             config = load_preset(name)
@@ -336,7 +443,7 @@ class TestAllPresetsIntegration:
 
     def test_all_presets_have_valid_completion_rules(self):
         """Verify all presets have valid completion rules."""
-        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline"]
+        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline", "project_kickoff"]
 
         for name in preset_names:
             config = load_preset(name)
@@ -349,7 +456,7 @@ class TestAllPresetsIntegration:
 
     def test_all_presets_no_dependency_cycles(self):
         """Verify no preset has dependency cycles."""
-        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline"]
+        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline", "project_kickoff"]
 
         for name in preset_names:
             # If there were cycles, this would raise DependencyCycleError
@@ -358,7 +465,7 @@ class TestAllPresetsIntegration:
 
     def test_all_presets_valid_artifact_types(self):
         """Verify all presets use valid artifact types."""
-        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline"]
+        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline", "project_kickoff"]
         valid_types = {"text", "image", "video", "audio", "form", "file", "diff"}
 
         for name in preset_names:
@@ -368,7 +475,7 @@ class TestAllPresetsIntegration:
 
     def test_all_presets_valid_actions(self):
         """Verify all presets use valid actions."""
-        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline"]
+        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline", "project_kickoff"]
 
         for name in preset_names:
             config = load_preset(name)
@@ -379,7 +486,7 @@ class TestAllPresetsIntegration:
 
     def test_all_presets_dependencies_resolve(self):
         """Verify all preset dependencies reference existing stages."""
-        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline"]
+        preset_names = ["questionnaire", "plan_review", "document_review", "diff_review", "generic_media_pipeline", "project_kickoff"]
 
         for name in preset_names:
             config = load_preset(name)

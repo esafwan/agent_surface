@@ -2,7 +2,7 @@ import sqlite3
 from typing import Union, Optional
 from pathlib import Path
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 INIT_SQL = """
 PRAGMA journal_mode = WAL;
@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS artifact_dependencies (
     PRIMARY KEY (upstream_artifact_id, downstream_artifact_id),
     FOREIGN KEY (upstream_artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
     FOREIGN KEY (downstream_artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS version_inputs (
+    version_id TEXT NOT NULL,
+    upstream_artifact_id TEXT NOT NULL,
+    upstream_version_id TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (version_id, upstream_artifact_id),
+    FOREIGN KEY (version_id) REFERENCES versions(id) ON DELETE CASCADE,
+    FOREIGN KEY (upstream_artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
+    FOREIGN KEY (upstream_version_id) REFERENCES versions(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS events (

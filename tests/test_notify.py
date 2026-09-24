@@ -252,17 +252,39 @@ class TestDetectNotifications:
         assert "failed status" in result[0]["message"]
 
     def test_detect_new_stale_artifacts(self):
-        """Verify detection of stale artifacts."""
+        """Verify detection of stale artifacts via freshness change."""
         store = Store(":memory:")
+
+        # Create artifacts to make one stale
+        store.create_artifact("upstream", "script", "Upstream", status="draft")
+        store.create_artifact("downstream", "shots", "Downstream", status="review")
+        store.create_artifact("other", "shots", "Other", status="review")
+
+        # Create initial version for upstream
+        store.put_version("upstream", content="v1", select=True)
+
+        # Add dependency BEFORE creating downstream version
+        store.add_dependency("upstream", "downstream")
+
+        # Create versions for downstream and other (downstream auto-captures upstream dep)
+        store.put_version("downstream", content="v1", select=True)
+        store.put_version("other", content="v1", select=True)
+
+        # Previous state: no stale artifacts
         previous = {
-            "total_artifacts": 5,
+            "total_artifacts": 3,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 3, "review": 2, "stale": 0},
+            "by_status": {"draft": 1, "review": 2},
         }
+
+        # Update upstream to make downstream stale
+        store.put_version("upstream", content="v2", select=True)
+
+        # Current state should detect 1 stale artifact
         current = {
-            "total_artifacts": 5,
+            "total_artifacts": 3,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 2, "review": 2, "stale": 1},
+            "by_status": {"draft": 1, "review": 2},
         }
 
         result = detect_notifications(store, previous_summary=previous, current_summary=current)
@@ -317,15 +339,44 @@ class TestDetectNotifications:
     def test_detect_multiple_changes(self):
         """Verify multiple simultaneous changes are all detected."""
         store = Store(":memory:")
+
+        # Create artifacts to simulate the state changes
+        store.create_artifact("art_1", "script", "A1", status="draft")
+        store.create_artifact("art_2", "shots", "A2", status="draft")
+        store.create_artifact("art_3", "shots", "A3", status="review")
+        store.create_artifact("art_4", "script", "A4", status="review")
+        store.create_artifact("art_5", "shots", "A5", status="approved")
+
+        # Create version for art_1 and art_4 first
+        store.put_version("art_1", content="v1", select=True)
+        store.put_version("art_4", content="v1", select=True)
+
+        # Add dependencies BEFORE creating downstream versions
+        store.add_dependency("art_1", "art_2")
+        store.add_dependency("art_1", "art_3")
+        store.add_dependency("art_4", "art_3")
+
+        # Create versions for downstream artifacts (after dependencies)
+        store.put_version("art_2", content="v1", select=True)
+        store.put_version("art_3", content="v1", select=True)
+        store.put_version("art_5", content="v1", select=True)
+
+        # Previous state: no stale, 0 failed
         previous = {
             "total_artifacts": 5,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 2, "review": 2, "approved": 1, "failed": 0, "stale": 0},
+            "by_status": {"draft": 2, "review": 2, "approved": 1},
         }
+
+        # Make changes: mark art_2 as failed, update art_1 to make art_2 and art_3 stale
+        store.set_status("art_2", "failed")
+        store.put_version("art_1", content="v2", select=True)
+
+        # Current state should show 2 stale, 1 failed
         current = {
             "total_artifacts": 5,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 0, "review": 1, "approved": 1, "failed": 1, "stale": 2},
+            "by_status": {"draft": 1, "review": 1, "approved": 1, "failed": 1},
         }
 
         result = detect_notifications(store, previous_summary=previous, current_summary=current)

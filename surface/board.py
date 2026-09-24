@@ -209,7 +209,7 @@ class DisplayModelBuilder:
                     display_model.pending_review_count += 1
                 if artifact_card.status == "generating":
                     display_model.generating_artifacts.add(artifact_card.artifact_id)
-                if artifact_card.status == "stale":
+                if artifact_card.stale_reason:
                     display_model.stale_artifacts.add(artifact_card.artifact_id)
                 if artifact_card.status == "failed":
                     display_model.failed_artifacts.add(artifact_card.artifact_id)
@@ -328,6 +328,16 @@ class DisplayModelBuilder:
             processing_events[0].get("claimed_at") if processing_events else None
         )
 
+        # Populate stale_reason from freshness.stale_because
+        stale_reason = None
+        freshness = artifact.get("freshness", {})
+        if not freshness.get("fresh", True):
+            stale_because = freshness.get("stale_because", [])
+            if stale_because:
+                stale_reason = f"stale (upstream: {', '.join(stale_because)})"
+            else:
+                stale_reason = "stale"
+
         card = ArtifactDisplayCard(
             artifact_id=artifact_id,
             stage=artifact["stage"],
@@ -339,6 +349,7 @@ class DisplayModelBuilder:
             allowed_actions=stage_obj.allowed_actions,
             approval_required=stage_obj.approval_required,
             has_generating_job=has_generating_job,
+            stale_reason=stale_reason,
             updated_at=artifact.get("updated_at", ""),
             pending_event_count=len(pending_events),
             processing_event_count=len(processing_events),
@@ -1195,7 +1206,7 @@ def format_artifact_meta(card: ArtifactDisplayCard) -> str:
         parts.append("🔒 locked")
     if card.has_generating_job:
         parts.append("⚙️ generating")
-    if card.status == "stale" or card.stale_reason:
+    if card.stale_reason:
         parts.append("⚠️ stale")
     return " &nbsp;·&nbsp; ".join(parts)
 

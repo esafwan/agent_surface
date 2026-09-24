@@ -100,6 +100,7 @@ class Store:
             res["meta"] = json.loads(res["meta_json"])
         else:
             res["meta"] = {}
+        res["freshness"] = self.compute_freshness(artifact_id)
         return res
 
     def list_artifacts(
@@ -123,6 +124,7 @@ class Store:
             res = dict(r)
             res["locked"] = bool(res["locked"])
             res["meta"] = json.loads(res["meta_json"]) if res.get("meta_json") else {}
+            res["freshness"] = self.compute_freshness(res["id"])
             result.append(res)
         return result
 
@@ -164,7 +166,25 @@ class Store:
         note: Optional[str] = None,
         source_event_id: Optional[str] = None,
         select: bool = True,
+        inputs: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
+        """Create a new version for an artifact.
+
+        `inputs`, if given, is an explicit `{upstream_artifact_id:
+        upstream_version_id}` mapping declaring exactly what upstream
+        versions this new version was built from; it is written verbatim to
+        `version_inputs` and used later by `compute_freshness`. Passing an
+        explicit `inputs` (even one captured earlier, e.g. at job-dispatch
+        time and therefore already stale by the time this call lands) is
+        never overridden with "current" values -- that is the whole point:
+        it lets an async worker record what it actually saw, not what
+        happened to be selected when its result finally arrived.
+
+        When `inputs` is omitted, it is auto-captured from the *current*
+        `artifact_dependencies` graph: for every upstream of this artifact,
+        whatever that upstream's `selected_version_id` is right now is
+        recorded. This is the common synchronous-generation case.
+        """
         artifact = self.get_artifact(artifact_id)
         if not artifact:
             raise ValueError(f"Artifact {artifact_id} not found")
@@ -224,6 +244,34 @@ class Store:
                     now,
                 ),
             )
+
+            # Record provenance for this version -- who it was built from.
+            if inputs is not None:
+                input_rows = dict(inputs)
+            else:
+                cursor.execute(
+                    "SELECT upstream_artifact_id FROM artifact_dependencies WHERE downstream_artifact_id = ?",
+                    (artifact_id,),
+                )
+                dep_rows = cursor.fetchall()
+                input_rows = {}
+                for dep_row in dep_rows:
+                    up_id = dep_row[0]
+                    cursor.execute(
+                        "SELECT selected_version_id FROM artifacts WHERE id = ?", (up_id,)
+                    )
+                    up_row = cursor.fetchone()
+                    if up_row and up_row[0]:
+                        input_rows[up_id] = up_row[0]
+
+            for up_artifact_id, up_version_id in input_rows.items():
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO version_inputs (version_id, upstream_artifact_id, upstream_version_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (version_id, up_artifact_id, up_version_id, now),
+                )
 
         stale_descendants = []
         if select:
@@ -382,8 +430,18 @@ class Store:
 
     def _propagate_stale(self, start_artifact_id: str) -> List[str]:
         """
-        Recursively traverse downstream dependent artifacts, mark them as 'stale',
-        and emit 'stale' system events for affected artifacts.
+        Recursively traverse downstream dependent artifacts and emit 'stale'
+        system events for affected artifacts, notifying that something
+        upstream changed.
+
+        This does NOT mutate any artifact's `status` column -- lifecycle
+        status (draft/in_review/approved/...) is a human/worker decision and
+        is never touched by staleness propagation. Whether an artifact is
+        actually stale is a computed fact, derived on read by
+        `compute_freshness` from `version_inputs`, not stored here. This
+        method only fans out a notification so downstream consumers (e.g. a
+        worker that wants to re-run) know something upstream moved.
+
         Revisited artifacts are avoided using a visited set.
         """
         cursor = self.conn.cursor()
@@ -409,11 +467,6 @@ class Store:
         now = _now_iso()
         stale_marked = []
         for down_id in descendants:
-            # Mark artifact as stale
-            cursor.execute(
-                "UPDATE artifacts SET status = 'stale', updated_at = ? WHERE id = ?",
-                (now, down_id),
-            )
             stale_marked.append(down_id)
 
             # Emit stale system event if not already emitted for this down_id
@@ -433,6 +486,72 @@ class Store:
                 )
 
         return stale_marked
+
+    def compute_freshness(
+        self, artifact_id: str, _visited: Optional[set] = None
+    ) -> Dict[str, Any]:
+        """Read-only, computed-on-every-call freshness check.
+
+        An artifact is fresh iff, for every upstream version it was built
+        from (per `version_inputs` on its currently selected version), that
+        upstream artifact's *current* `selected_version_id` still matches
+        the recorded one -- AND that upstream artifact is itself fresh
+        (transitive staleness). Nothing here is stored or cached; it is
+        purely derived from `version_inputs` + `artifacts.selected_version_id`
+        at call time, so reverting an upstream selection back to a recorded
+        version id makes downstream fresh again with no extra bookkeeping.
+
+        `_visited` guards against runaway recursion; `add_dependency`
+        already prevents cycles at the edge level, but this stays defensive.
+        """
+        if _visited is None:
+            _visited = set()
+        if artifact_id in _visited:
+            # Already being evaluated up the call chain (or a cycle slipped
+            # through some other path) -- don't treat it as a new source of
+            # staleness, just stop recursing.
+            return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+        _visited.add(artifact_id)
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT selected_version_id FROM artifacts WHERE id = ?", (artifact_id,)
+        )
+        row = cursor.fetchone()
+        if not row or not row["selected_version_id"]:
+            return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+
+        selected_version_id = row["selected_version_id"]
+
+        cursor.execute(
+            "SELECT upstream_artifact_id, upstream_version_id FROM version_inputs WHERE version_id = ?",
+            (selected_version_id,),
+        )
+        input_rows = cursor.fetchall()
+
+        stale_because: List[str] = []
+        for input_row in input_rows:
+            up_artifact_id = input_row["upstream_artifact_id"]
+            recorded_upstream_version_id = input_row["upstream_version_id"]
+
+            cursor.execute(
+                "SELECT selected_version_id FROM artifacts WHERE id = ?",
+                (up_artifact_id,),
+            )
+            up_row = cursor.fetchone()
+            current_upstream_version_id = up_row["selected_version_id"] if up_row else None
+
+            direct_stale = current_upstream_version_id != recorded_upstream_version_id
+            upstream_freshness = self.compute_freshness(up_artifact_id, _visited=_visited)
+
+            if direct_stale or not upstream_freshness["fresh"]:
+                stale_because.append(up_artifact_id)
+
+        return {
+            "artifact_id": artifact_id,
+            "fresh": len(stale_because) == 0,
+            "stale_because": stale_because,
+        }
 
     # -------------------------------------------------------------------------
     # Event Inbox

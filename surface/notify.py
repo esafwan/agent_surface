@@ -181,9 +181,15 @@ def detect_notifications(
             }
         )
 
-    # Detect new stale artifacts: "stale" count increased
-    current_stale = current_by_status.get("stale", 0)
+    # Detect new stale artifacts: count from freshness, not status
+    # Stale artifacts are those with freshness.fresh == False
+    all_artifacts = store.list_artifacts()
+    current_stale = len([a for a in all_artifacts if not a["freshness"]["fresh"]])
+
+    # For previous stale count, try to get it from the summary if available
+    # (it may have been stored by an earlier version), otherwise default to 0
     previous_stale = previous_by_status.get("stale", 0)
+
     if current_stale > previous_stale:
         new_stales = current_stale - previous_stale
         notifications.append(

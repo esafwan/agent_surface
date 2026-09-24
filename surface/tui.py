@@ -60,7 +60,7 @@ def _artifact_summary_line(card: ArtifactDisplayCard) -> str:
         badges.append("LOCKED")
     if card.has_generating_job:
         badges.append("GENERATING")
-    if card.status == "stale" or card.stale_reason:
+    if card.stale_reason:
         badges.append("STALE")
     badge_str = f" [{', '.join(badges)}]" if badges else ""
 

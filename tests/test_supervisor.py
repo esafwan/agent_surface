@@ -201,19 +201,33 @@ class TestRehydrationSummary:
         assert summary["recent_event_ids"] == []
 
     def test_build_summary_with_artifacts(self, supervisor_with_native, in_memory_store, movie_config):
-        """Test summary with artifacts."""
+        """Test summary with artifacts, including stale detection via freshness."""
         # Create artifacts
         in_memory_store.create_artifact("art_1", "script", "Script 1", status="approved")
-        in_memory_store.create_artifact("art_2", "shots", "Shots 1", status="stale")
+        in_memory_store.create_artifact("art_2", "shots", "Shots 1", status="approved")
         in_memory_store.create_artifact("art_3", "shots", "Shots 2", status="approved")
         in_memory_store.create_artifact("art_4", "keyframes", "Frames 1", status="generating")
+
+        # Create version for art_1 first
+        in_memory_store.put_version("art_1", content="Script content", select=True)
+
+        # Add a dependency: art_1 -> art_2 (art_2 depends on art_1)
+        in_memory_store.add_dependency("art_1", "art_2")
+
+        # Now create versions for the others (art_2 needs to be after the dependency)
+        in_memory_store.put_version("art_2", content="Shots content", select=True)
+        in_memory_store.put_version("art_3", content="More shots", select=True)
+        in_memory_store.put_version("art_4", content="Frame content", select=True)
+
+        # Update art_1 to make art_2 stale (computed via freshness, not status)
+        in_memory_store.put_version("art_1", content="Updated script", select=True)
 
         summary = supervisor_with_native._build_rehydration_summary()
 
         assert summary["artifact_count"] == 4
         assert summary["stage_counts"]["script"]["approved"] == 1
-        assert summary["stage_counts"]["shots"]["stale"] == 1
-        assert summary["stage_counts"]["shots"]["approved"] == 1
+        assert summary["stage_counts"]["shots"]["stale"] == 1  # art_2 is stale due to freshness
+        assert summary["stage_counts"]["shots"]["approved"] == 2  # art_2 and art_3 are both approved (art_2 is also stale)
         assert summary["stage_counts"]["keyframes"]["generating"] == 1
 
 

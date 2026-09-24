@@ -67,6 +67,10 @@ def populated_store(store, stage_config):
         stage="shots",
         title="Shot List",
     )
+
+    # Add dependency BEFORE selecting version so version_inputs gets populated
+    store.add_dependency("script_001", "shots_001", kind="content")
+
     shots_v1 = store.put_version(
         "shots_001",
         content="Shot 1: Wide of room\nShot 2: Close of hero",
@@ -74,15 +78,16 @@ def populated_store(store, stage_config):
         select=True,
     )
 
-    # Create dependency
-    store.add_dependency("script_001", "shots_001", kind="content")
-
     # Create keyframes artifact
     keyframes = store.create_artifact(
         id="keyframe_001",
         stage="keyframes",
         title="Keyframe 1",
     )
+
+    # Add dependency BEFORE selecting version so version_inputs gets populated
+    store.add_dependency("shots_001", "keyframe_001", kind="content")
+
     kf_v1 = store.put_version(
         "keyframe_001",
         content_type="image/png",
@@ -101,8 +106,6 @@ def populated_store(store, stage_config):
         created_by="worker",
         select=False,
     )
-
-    store.add_dependency("shots_001", "keyframe_001", kind="content")
 
     return store
 
@@ -836,16 +839,16 @@ def test_complex_dag_stale_propagation(store, stage_config):
 
     # Check stale propagation
     b_artifact = store.get_artifact("b")
-    assert b_artifact["status"] == "stale"
+    assert b_artifact["freshness"]["fresh"] is False
 
     c_artifact = store.get_artifact("c")
-    assert c_artifact["status"] == "stale"
+    assert c_artifact["freshness"]["fresh"] is False
 
     d_artifact = store.get_artifact("d")
-    assert d_artifact["status"] == "stale"
+    assert d_artifact["freshness"]["fresh"] is False
 
     e_artifact = store.get_artifact("e")
-    assert e_artifact["status"] == "stale"
+    assert e_artifact["freshness"]["fresh"] is False
 
 
 def test_empty_version_list(store, stage_config):
