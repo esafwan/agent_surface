@@ -484,3 +484,87 @@ class TestResumeTransportResume:
 
         assert resumed is not None
         assert resumed.session_id != "nonexistent_session"
+
+
+# ============================================================================
+# Process-group kill/interrupt: a worker may spawn a grandchild (a real
+# coding-agent CLI) -- killing/interrupting the worker must reach it too,
+# or it survives as an orphan.
+# ============================================================================
+
+import os
+import time
+
+_GRANDCHILD_WORKER_SCRIPT = """
+import subprocess, sys
+
+pid_file = sys.argv[1]
+gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open(pid_file, "w") as f:
+    f.write(str(gc.pid))
+
+for line in sys.stdin:
+    pass
+"""
+
+
+def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group kill is POSIX-only")
+class TestProcessGroupKillsGrandchild:
+    def test_timeout_kill_reaps_grandchild(self, tmp_path):
+        pid_file = tmp_path / "gc.pid"
+        script_file = tmp_path / "worker.py"
+        script_file.write_text(_GRANDCHILD_WORKER_SCRIPT)
+
+        transport = NativeStreamTransport(
+            command=[sys.executable, str(script_file), str(pid_file)],
+            timeout=1,
+        )
+        session = transport.start({})
+
+        deadline = time.time() + 5
+        while time.time() < deadline and not pid_file.exists():
+            time.sleep(0.05)
+        assert pid_file.exists(), "worker never wrote grandchild pid"
+        grandchild_pid = int(pid_file.read_text().strip())
+
+        os.kill(grandchild_pid, 0)  # raises if already dead
+
+        result = transport.send_event(session, {"type": "revise", "event_id": "evt_1", "payload": {}})
+        assert result == {"ok": False, "error": "timeout"}
+        assert session.poisoned is True
+
+        assert _wait_until_dead(grandchild_pid), "grandchild survived the timeout kill"
+
+    def test_interrupt_reaps_grandchild(self, tmp_path):
+        pid_file = tmp_path / "gc2.pid"
+        script_file = tmp_path / "worker2.py"
+        script_file.write_text(_GRANDCHILD_WORKER_SCRIPT)
+
+        transport = NativeStreamTransport(
+            command=[sys.executable, str(script_file), str(pid_file)],
+            timeout=30,
+        )
+        session = transport.start({})
+
+        deadline = time.time() + 5
+        while time.time() < deadline and not pid_file.exists():
+            time.sleep(0.05)
+        assert pid_file.exists()
+        grandchild_pid = int(pid_file.read_text().strip())
+        os.kill(grandchild_pid, 0)
+
+        result = transport.interrupt(session)
+        assert result["ok"] is True
+
+        assert _wait_until_dead(grandchild_pid), "grandchild survived interrupt"
