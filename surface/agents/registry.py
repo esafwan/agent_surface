@@ -1,5 +1,6 @@
 """Registry of known AgentBackend implementations."""
 
+from surface.agents.agy_backend import AGY_BACKEND
 from surface.agents.base import AgentBackend
 from surface.agents.codex_backend import CODEX_BACKEND
 from surface.agents.fake_backend import FAKE_BACKEND
@@ -9,8 +10,7 @@ BACKENDS: dict[str, AgentBackend] = {
     "fake": FAKE_BACKEND,
     "opencode": OPENCODE_BACKEND,
     "codex": CODEX_BACKEND,
-    # T2c will register the agy backend here, e.g.:
-    #   "agy": AntigravityBackend(),
+    "agy": AGY_BACKEND,
 }
 
 
