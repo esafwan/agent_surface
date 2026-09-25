@@ -864,6 +864,194 @@ class TestServeRuntime:
         assert "No store" in captured.err
 
 
+class TestWorkerCommandBuilding:
+    """Tests for worker command construction with agent flags."""
+
+    def test_build_worker_command_without_agent(self, cli_with_temp_db):
+        """Without --agent, command should have no agent flags."""
+        cli = cli_with_temp_db
+        command, timeout = cli._build_worker_command(
+            base_command=None,
+            agent=None,
+            agent_model=None,
+            agent_timeout=120,
+        )
+
+        # Should be the default command
+        assert sys.executable in command
+        assert "-m" in command
+        assert "surface.worker" in command
+        assert "--db" in command
+
+        # No agent flags should be present
+        assert "--agent" not in command
+        assert "--agent-model" not in command
+        assert "--agent-timeout" not in command
+
+        # Timeout should be turn_timeout (300)
+        assert timeout == 300
+
+    def test_build_worker_command_with_agent_and_model(self, cli_with_temp_db):
+        """With --agent and --agent-model, command should include both flags."""
+        cli = cli_with_temp_db
+        command, timeout = cli._build_worker_command(
+            base_command=None,
+            agent="test-agent",
+            agent_model="test-model",
+            agent_timeout=120,
+        )
+
+        # Should have agent flags
+        assert "--agent" in command
+        idx = command.index("--agent")
+        assert command[idx + 1] == "test-agent"
+
+        assert "--agent-model" in command
+        idx = command.index("--agent-model")
+        assert command[idx + 1] == "test-model"
+
+        assert "--agent-timeout" in command
+        idx = command.index("--agent-timeout")
+        assert command[idx + 1] == "120"
+
+        # Timeout should be max(300, 120+30) = 300
+        assert timeout == 300
+
+    def test_build_worker_command_with_agent_only(self, cli_with_temp_db):
+        """With --agent but no --agent-model, command should include agent and timeout but not model."""
+        cli = cli_with_temp_db
+        command, timeout = cli._build_worker_command(
+            base_command=None,
+            agent="test-agent",
+            agent_model=None,
+            agent_timeout=120,
+        )
+
+        # Should have agent and timeout but not model
+        assert "--agent" in command
+        idx = command.index("--agent")
+        assert command[idx + 1] == "test-agent"
+
+        assert "--agent-model" not in command
+
+        assert "--agent-timeout" in command
+        idx = command.index("--agent-timeout")
+        assert command[idx + 1] == "120"
+
+        # Timeout should be max(300, 120+30) = 300
+        assert timeout == 300
+
+    def test_build_worker_command_timeout_exceeds_turn_timeout(self, cli_with_temp_db):
+        """When agent_timeout + 30 > turn_timeout, timeout should use agent timeout."""
+        cli = cli_with_temp_db
+        command, timeout = cli._build_worker_command(
+            base_command=None,
+            agent="test-agent",
+            agent_model=None,
+            agent_timeout=300,  # 300 + 30 = 330 > 300
+        )
+
+        # Timeout should be max(300, 300+30) = 330
+        assert timeout == 330
+
+    def test_build_worker_command_with_custom_base_command(self, cli_with_temp_db):
+        """base_command should be used as the base for agent flag appending."""
+        cli = cli_with_temp_db
+        custom_base = ["python", "custom_worker.py", "--option", "value"]
+        command, timeout = cli._build_worker_command(
+            base_command=custom_base,
+            agent="test-agent",
+            agent_model="test-model",
+            agent_timeout=120,
+        )
+
+        # Should start with custom base
+        assert command[:4] == custom_base
+
+        # Should have agent flags at the end
+        assert "--agent" in command
+        assert "test-agent" in command
+        assert "--agent-model" in command
+        assert "test-model" in command
+        assert "--agent-timeout" in command
+        assert "120" in command
+
+    def test_serve_with_agent_flags_passes_to_transport(self, serve_project, capsys):
+        """serve() with --agent flags should pass them to worker_command and compute timeout."""
+        cli, db_path = serve_project
+        store = cli.get_store()
+        store.create_artifact(id="script_1", stage="script", title="Script")
+
+        # Spy on NativeStreamTransport to verify it gets the right command and timeout
+        import surface.cli as cli_module
+        real_transport = cli_module.NativeStreamTransport
+        captured_args = {}
+
+        def _spy(command=None, timeout=None, **kwargs):
+            captured_args["command"] = command
+            captured_args["timeout"] = timeout
+            return real_transport(command=ECHO_WORKER_COMMAND, timeout=timeout, **kwargs)
+
+        cli_module.NativeStreamTransport = _spy
+        try:
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=False,
+                agent="test-agent",
+                agent_model="test-model",
+                agent_timeout=150,
+            )
+        finally:
+            cli_module.NativeStreamTransport = real_transport
+
+        capsys.readouterr()
+
+        # Verify the command has agent flags
+        assert "--agent" in captured_args["command"]
+        assert "test-agent" in captured_args["command"]
+        assert "--agent-model" in captured_args["command"]
+        assert "test-model" in captured_args["command"]
+
+        # Verify timeout is max(300, 150+30) = 300
+        assert captured_args["timeout"] == 300
+
+    def test_serve_without_agent_flags_uses_default_timeout(self, serve_project, capsys):
+        """serve() without --agent should use default turn_timeout."""
+        cli, db_path = serve_project
+        store = cli.get_store()
+        store.create_artifact(id="script_1", stage="script", title="Script")
+
+        import surface.cli as cli_module
+        real_transport = cli_module.NativeStreamTransport
+        captured_args = {}
+
+        def _spy(command=None, timeout=None, **kwargs):
+            captured_args["command"] = command
+            captured_args["timeout"] = timeout
+            return real_transport(command=ECHO_WORKER_COMMAND, timeout=timeout, **kwargs)
+
+        cli_module.NativeStreamTransport = _spy
+        try:
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=False,
+            )
+        finally:
+            cli_module.NativeStreamTransport = real_transport
+
+        capsys.readouterr()
+
+        # Verify no agent flags
+        assert "--agent" not in captured_args["command"]
+        assert "--agent-model" not in captured_args["command"]
+        assert "--agent-timeout" not in captured_args["command"]
+
+        # Verify timeout is the default turn_timeout (300)
+        assert captured_args["timeout"] == 300
+
+
 class TestErrorHandling:
     """Tests for error handling."""
 
