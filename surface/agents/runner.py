@@ -6,7 +6,6 @@ parse_output().
 
 import os
 import re
-import signal
 import subprocess
 import time
 from typing import Optional
@@ -59,6 +58,16 @@ def run_agent(
     env = dict(os.environ)
     env.update(backend.env_overrides() or {})
 
+    # Deliberately NOT start_new_session=True here: run_agent() is normally
+    # called from inside a worker subprocess that NativeStreamTransport
+    # itself already made a process-group leader (see
+    # surface/transports/native_stream.py). If this child started its own
+    # new session, it would escape that group, and a transport-level
+    # timeout's os.killpg(worker_pgid, ...) would kill the worker but leave
+    # this CLI child (and any of its own grandchildren) running as an
+    # orphan -- exactly the failure this whole process-group design exists
+    # to prevent. Letting it inherit the caller's process group means ONE
+    # top-level killpg reaps the whole tree, however deep.
     popen_kwargs = dict(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -66,8 +75,6 @@ def run_agent(
         cwd=workdir,
         env=env,
     )
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
 
     proc = subprocess.Popen(argv, **popen_kwargs)
 
@@ -76,11 +83,11 @@ def run_agent(
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
+        # Only this one process is ours to reap here (no new session was
+        # created for it); if IT spawned further grandchildren, those are
+        # caught by the outer, top-level process-group kill instead.
         try:
-            if os.name == "posix":
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                proc.kill()
+            proc.kill()
         except (ProcessLookupError, OSError):
             pass
         try:
