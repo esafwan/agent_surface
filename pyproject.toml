@@ -24,3 +24,9 @@ packages = ["surface", "surface.transports", "surface.providers", "surface.stage
 
 [tool.setuptools.package-data]
 surface = ["stages/*.json", "static/*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live_agent: invokes a real coding-agent CLI binary; skip cleanly if missing",
+    "agent_fault: fault-injection test through the real Supervisor/worker path",
+]
