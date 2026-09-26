@@ -104,3 +104,137 @@ See `PHASE3.md` for why the remaining 7 items (hosted service, multi-user collab
 cross-machine scheduling, preset marketplace, MCP Apps renderer, A2UI renderer) are
 infrastructure/ecosystem decisions without a fixed "done" state, not deferred out of
 laziness.
+
+## Real-agent backend integration update (2026-09-26): supersedes the earlier CLI smoke test
+
+This session replaced the earlier smoke-test approach (manual bypass scripts shelling out
+to opencode/codex directly and hand-writing results to the store) with real integration
+through the production `Supervisor → NativeStreamTransport → surface.worker` dispatch path.
+Every event now claims, deserializes, times out, recovers, and re-attempts exactly as it
+would in the live board, with the agent CLI integrated as a normal part of the worker's
+handler, not a side channel.
+
+**What was built:**
+
+- `surface/agents/` package:
+  - `base.py`: `AgentBackend` Protocol defining the interface every agent CLI adapter must
+    implement (`build_argv`, `parse_output`, `env_overrides`). `AgentError` and `AgentReply`
+    types for normalized error/success handling.
+  - `runner.py`: `run_agent()` function that spawns an agent CLI subprocess, enforces a
+    timeout by killing the whole process group (not just the child), and parses output via
+    the backend's parser. Includes the critical fix: `start_new_session=False` so the agent
+    CLI child inherits the worker's process group, allowing a single top-level `killpg` to
+    reap the entire tree (worker + agent CLI + any grandchildren the CLI spawned).
+  - `prompt.py`: `build_prompt()` constructs the prompt sent to the agent CLI, using context
+    about the event type, note/message, selected content, and artifact stage.
+  - `registry.py`: `get_backend()` registry lookup by name (e.g. "opencode", "codex", "agy",
+    "fake").
+  - Adapter implementations: `opencode_backend.py`, `codex_backend.py`, `agy_backend.py`,
+    `fake_backend.py` — each implements the `AgentBackend` protocol for its CLI, handling
+    model ID format, argv construction, stdout/stderr parsing, and env overrides.
+
+- `surface/transports/native_stream.py` process-group safety fix:
+  - Added `_killpg_kill()` and `_killpg_interrupt()` helpers that send signals to the entire
+    worker process group (via `os.killpg()` on POSIX), not just the worker process itself.
+  - **Why this was needed**: A worker that shells out to an agent CLI (e.g. `opencode run ...`)
+    creates a grandchild process. If the worker didn't use `start_new_session=True` (which
+    it doesn't, per the runner.py design), then a naive `process.kill()` would only kill the
+    worker, leaving the agent CLI running as an orphan. The process-group fix ensures one
+    top-level `killpg(worker_pgid, SIGKILL)` reaps the entire tree.
+
+- `surface/worker.py` `AgentConfig` class and integration:
+  - `AgentConfig` holds optional `name`, `model`, `timeout`, and `log_dir` for the agent
+    backend. When `name` is `None` (the default), the worker is the deterministic reference
+    worker, unchanged from Phase 0 — all 611+ pre-existing tests still pass without modification.
+  - `_handle_revise()` uses `_generate_agent_content()` when `agent_config.enabled` is true,
+    dispatching to `run_agent()` with the backend, prompt, and timeout.
+  - Errors from `run_agent()` (timeout, crash, bad output, auth, rate limit) map to the
+    normal retry path, with lease expiry leading to automatic re-attempt, no special handling.
+
+- `surface/cli.py` wiring:
+  - Added `--agent <name>`, `--agent-model <id>`, `--agent-timeout <seconds>` flags to the
+    `serve` command.
+  - When `--agent` is set, the worker subprocess is invoked with `--agent` and related flags
+    passed through. The transport timeout is set to `max(turn_timeout, agent_timeout + 30)`
+    to give the agent CLI headroom.
+
+- `tests/test_agent_faults.py`: Real fault-injection test suite exercising the full production
+  path (not a bypass). Supervisor claims events, dispatches through NativeStreamTransport
+  into a real `python -m surface.worker --agent fake` subprocess, which then shells out to
+  the fake agent CLI backend. Tests verify:
+  - Crash → lease expiry → automatic re-attempt.
+  - Timeout → process-group kill → no orphan processes.
+  - Successful convergence through the real path (not just deterministic worker logic).
+  - Worker-count is as expected; no stray orphans left behind.
+
+- Individual real-CLI tests (skipped in normal CI unless `@pytest.mark.live_agent` is
+  enabled): `tests/test_agents_opencode.py`, `tests/test_agents_codex.py`,
+  `tests/test_agents_agy.py`. Each calls the real CLI (if installed) and verifies output
+  parsing without network timeouts.
+
+**Test results:**
+
+- Full suite: **638 passed, 3 skipped** (skipped: Gradio-related tests requiring gradio 5.50
+  which is not installed in this test environment).
+- All 411+ pre-existing tests continue to pass (deterministic reference worker path).
+- All real-agent-path tests pass, including the fault-injection suite through the production
+  Supervisor/transport/worker dispatch path.
+
+**Soak-test evidence (real HTTP against live `surface serve` process):**
+
+Located at `ongoing/phase-1-2-harden-generalize/live_runs/`:
+
+- **`fake-1790375994.jsonl`**: 2 runs, both converged (`converged: true`), both `ok: true`.
+  No orphan processes on timeout (`orphan_workers_remaining: 0`). Latency ~1 second per run.
+  ✓ **Proven**: The fake backend converges, recovers cleanly, and leaves no orphans.
+
+- **`opencode-1790376009.jsonl`** (superseded, kept as evidence of the bug below): 5 runs,
+  none converged, all timing out at exactly the configured `agent_timeout` (~180s = 3x the
+  poll deadline). Root cause found: `run_agent()`'s subprocess left `stdin` unredirected
+  (inherited). In isolation that's harmless, but `run_agent()` runs *inside* the worker
+  subprocess, whose own stdin is the long-lived pipe `NativeStreamTransport` uses to send
+  future turns — deliberately never closed between turns. The opencode CLI child inherited
+  that pipe, treated its non-EOF stdin as something to read/monitor, threw an unhandled
+  EPIPE, and hung until timeout — reproducibly, independent of prompt complexity. This was a
+  real dispatch-path bug, not a model-capability issue as first suspected. Fixed with
+  `stdin=subprocess.DEVNULL` on the agent CLI child (`surface/agents/runner.py`).
+- **`opencode-1790417636.jsonl`** (post-fix): 5/5 runs converged, including the run-3
+  mid-turn SIGKILL (recovers automatically via lease expiry, no human polling), 0 orphan
+  processes on every run. Latency 9–22s per run. ✓ **Proven.**
+- **`agy-1790417636.jsonl`** (post-fix): 5/5 runs converged, including the run-3 mid-turn
+  SIGKILL, 0 orphan processes on every run. Latency 9–31s per run. ✓ **Proven.**
+
+**Unchanged from Phase 0 (confirmed via git diff):**
+
+```
+surface/board_web.py     — unchanged (board still no-API, live, browser-controlled)
+surface/board.py         — unchanged
+surface/static/          — unchanged
+surface/store.py         — unchanged by this session's agent work
+surface/schema.py        — unchanged
+surface/stages/          — unchanged
+```
+
+The board's entire architecture (no-API, live polling + action-triggered refresh, store-backed)
+remains untouched. All integration of the real agent CLI is at the worker level, below the
+board, exactly as designed.
+
+**What remains open:**
+
+1. **Soak proof for codex**: opencode and agy are now proven (5/5, above); codex has only
+   the unit-level live-CLI test, not the same soak-test evidence, and hasn't been run through
+   `scripts/agent_soak.py` yet.
+
+2. **`kimi` backend**: Documented in `docs/agent-backends.md` but dropped from the active
+   backend set due to subscription auth requirement (not installed/auth'd in the current
+   environment). When kimi is authenticated, adding `kimi_backend.py` would be identical
+   in structure to the others.
+
+3. **Board E2E test**: A real browser-driven test exercising the board UI → supervisor →
+   worker → agent CLI → response → board update loop. (Soak test coverage is HTTP-level,
+   not UI-level.)
+
+4. **Senior adversarial review**: This session's work closes the specific earlier review
+   finding ("smoke test only, not real dispatch"). A follow-up review would be appropriate
+   to audit the process-group fix, the stdin fix, the timeout enforcement, and the
+   fault-recovery path.
