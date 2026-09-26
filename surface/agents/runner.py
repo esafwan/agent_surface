@@ -68,7 +68,20 @@ def run_agent(
     # orphan -- exactly the failure this whole process-group design exists
     # to prevent. Letting it inherit the caller's process group means ONE
     # top-level killpg reaps the whole tree, however deep.
+    #
+    # stdin is explicitly closed (DEVNULL), not inherited: when run_agent()
+    # is called from inside the worker subprocess, the worker's own stdin
+    # is the still-open pipe NativeStreamTransport uses to send it the next
+    # turn's envelope. Left unredirected, the agent CLI inherits that fd,
+    # and at least the opencode CLI treats a non-tty stdin as something to
+    # read/monitor for liveness -- it never gets EOF (the transport keeps
+    # the write end open across turns), logs an unhandled EPIPE rejection,
+    # and hangs until run_agent()'s own timeout kills it. This reproduces
+    # even for a trivial prompt, so it is not a slow-response issue -- see
+    # the T7 soak investigation. Closing stdin avoids the whole class of
+    # "child inherits a long-lived pipe it wasn't meant to see" behavior.
     popen_kwargs = dict(
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

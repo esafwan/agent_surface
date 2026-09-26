@@ -1,0 +1,5 @@
+{"run": 1, "backend": "opencode", "model": "opencode-go/glm-5.3", "killed_mid_turn": false, "latency_s": 180.45, "converged": false, "version_count": null, "orphan_workers_remaining": 0, "ok": false}
+{"run": 2, "backend": "opencode", "model": "opencode-go/glm-5.3", "killed_mid_turn": false, "latency_s": 180.57, "converged": false, "version_count": null, "orphan_workers_remaining": 0, "ok": false}
+{"run": 3, "backend": "opencode", "model": "opencode-go/glm-5.3", "killed_mid_turn": true, "latency_s": 180.87, "converged": false, "version_count": null, "orphan_workers_remaining": 0, "ok": false}
+{"run": 4, "backend": "opencode", "model": "opencode-go/glm-5.3", "killed_mid_turn": false, "latency_s": 180.52, "converged": false, "version_count": null, "orphan_workers_remaining": 0, "ok": false}
+{"run": 5, "backend": "opencode", "model": "opencode-go/glm-5.3", "killed_mid_turn": false, "latency_s": 180.51, "converged": false, "version_count": null, "orphan_workers_remaining": 0, "ok": false}

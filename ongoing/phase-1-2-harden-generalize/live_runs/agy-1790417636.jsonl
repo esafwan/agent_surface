@@ -1,0 +1,5 @@
+{"run": 1, "backend": "agy", "model": null, "killed_mid_turn": false, "latency_s": 10.08, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 2, "backend": "agy", "model": null, "killed_mid_turn": false, "latency_s": 9.08, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 3, "backend": "agy", "model": null, "killed_mid_turn": true, "latency_s": 30.61, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 4, "backend": "agy", "model": null, "killed_mid_turn": false, "latency_s": 13.12, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 5, "backend": "agy", "model": null, "killed_mid_turn": false, "latency_s": 10.1, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
