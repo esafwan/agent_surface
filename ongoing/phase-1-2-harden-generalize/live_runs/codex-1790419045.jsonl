@@ -1,0 +1,5 @@
+{"run": 1, "backend": "codex", "model": null, "killed_mid_turn": false, "latency_s": 9.06, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 2, "backend": "codex", "model": null, "killed_mid_turn": false, "latency_s": 10.07, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 3, "backend": "codex", "model": null, "killed_mid_turn": true, "latency_s": 6.38, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 4, "backend": "codex", "model": null, "killed_mid_turn": false, "latency_s": 9.05, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 5, "backend": "codex", "model": null, "killed_mid_turn": false, "latency_s": 9.06, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}

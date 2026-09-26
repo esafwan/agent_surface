@@ -142,17 +142,15 @@ deterministic reference worker would take, except with a real network-calling CL
 non-interactive invocation templates and model ID formats per backend (e.g. `opencode-go/glm-5.3`
 for opencode, `claude-sonnet-4` for codex, `claude-opus-4-6-thinking` for agy).
 
-**Backends proven to converge**: `fake`, `opencode` (model `opencode-go/glm-5.3`), and `agy`
-(default model) have each been proven via a real, repeated soak test (`scripts/agent_soak.py`)
+**Backends proven to converge**: `fake`, `opencode` (model `opencode-go/glm-5.3`), `codex`,
+and `agy` have each been proven via a real, repeated soak test (`scripts/agent_soak.py`)
 against the live `surface serve` process over real HTTP — real board API calls, not a bypass
-script. Both real backends hit 5/5 converged runs, including a run where the worker
+script. All three real backends hit 5/5 converged runs, including a run where the worker
 subprocess is SIGKILLed mid-turn to prove automatic recovery, with zero orphaned processes
 on every run. Logs are committed under
 [`ongoing/phase-1-2-harden-generalize/live_runs/`](ongoing/phase-1-2-harden-generalize/live_runs/).
-`codex` has an individual unit-level `@pytest.mark.live_agent` test that calls the real CLI
-and verifies correct output parsing, but has not yet been run through the same soak. `kimi`
-is scaffolded in the CLI reference doc only — this machine's subscription doesn't currently
-have access, so it was dropped from the registered backends.
+`kimi` is scaffolded in the CLI reference doc only — this machine's subscription doesn't
+currently have access, so it was dropped from the registered backends.
 
 **Testing without a real CLI**: A `fake` backend (deterministic, no network call) exists for
 all unit and integration tests. Run `python -m pytest -q` to exercise the full stack through

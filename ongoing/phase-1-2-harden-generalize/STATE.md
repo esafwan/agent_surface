@@ -207,6 +207,10 @@ Located at `ongoing/phase-1-2-harden-generalize/live_runs/`:
   processes on every run. Latency 9–22s per run. ✓ **Proven.**
 - **`agy-1790417636.jsonl`** (post-fix): 5/5 runs converged, including the run-3 mid-turn
   SIGKILL, 0 orphan processes on every run. Latency 9–31s per run. ✓ **Proven.**
+- **`codex-1790419045.jsonl`**: 5/5 runs converged, including the run-3 mid-turn SIGKILL,
+  0 orphan processes on every run. Latency 6–10s per run. ✓ **Proven.** (Closed the one gap
+  flagged by the T11 senior review below: all three registered real backends now have soak
+  evidence, not just unit-level live-CLI tests.)
 
 **Unchanged from Phase 0 (confirmed via git diff):**
 
@@ -223,22 +227,28 @@ The board's entire architecture (no-API, live polling + action-triggered refresh
 remains untouched. All integration of the real agent CLI is at the worker level, below the
 board, exactly as designed.
 
+**Senior adversarial review (T11, Opus low effort):** Verdict was accept, with two gaps
+flagged: codex lacked soak evidence (closed above, same session), and the board E2E was
+HTTP-level rather than browser-driven for the automated suite. Both the automated
+`tests/test_board_agent_e2e.py` (HTTP-level, in-suite) and a manual real-browser run against
+a real `surface serve --agent opencode` process (not committed as an automated test, since it
+needs a real network-calling CLI) confirmed the board's live, no-API UX is driven end-to-end
+by a real agent with no manual DB access. The review explicitly confirmed: no bypass path
+exists, fault injection runs through the real Supervisor/transport/worker path, both fixes
+(process-group kill, stdin=DEVNULL) are real and minimally targeted, harness independence
+holds (49–84 lines of pure per-backend glue), and the board/store/schema diff is empty.
+
 **What remains open:**
 
-1. **Soak proof for codex**: opencode and agy are now proven (5/5, above); codex has only
-   the unit-level live-CLI test, not the same soak-test evidence, and hasn't been run through
-   `scripts/agent_soak.py` yet.
-
-2. **`kimi` backend**: Documented in `docs/agent-backends.md` but dropped from the active
+1. **`kimi` backend**: Documented in `docs/agent-backends.md` but dropped from the active
    backend set due to subscription auth requirement (not installed/auth'd in the current
    environment). When kimi is authenticated, adding `kimi_backend.py` would be identical
    in structure to the others.
 
-3. **Board E2E test**: A real browser-driven test exercising the board UI → supervisor →
-   worker → agent CLI → response → board update loop. (Soak test coverage is HTTP-level,
-   not UI-level.)
+2. **Soak statistics are an existence proof, not a reliability claim**: N=5 per backend with
+   one mid-turn kill each proves the mechanism works, not a failure rate. A larger N would be
+   needed before citing a specific reliability number.
 
-4. **Senior adversarial review**: This session's work closes the specific earlier review
-   finding ("smoke test only, not real dispatch"). A follow-up review would be appropriate
-   to audit the process-group fix, the stdin fix, the timeout enforcement, and the
-   fault-recovery path.
+3. **A fully browser-driven (not just HTTP-level) automated E2E test** exercising a real CLI
+   through Playwright or similar isn't in the automated suite — the manual browser run above
+   covers this once, but isn't repeatable via `pytest`.
