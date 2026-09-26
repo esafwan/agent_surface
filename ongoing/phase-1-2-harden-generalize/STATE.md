@@ -172,13 +172,17 @@ handler, not a side channel.
   `tests/test_agents_agy.py`. Each calls the real CLI (if installed) and verifies output
   parsing without network timeouts.
 
-**Test results:**
+**Test results (regression gate, 3 consecutive runs after the T7 stdin fix + T8 E2E test):**
 
-- Full suite: **638 passed, 3 skipped** (skipped: Gradio-related tests requiring gradio 5.50
-  which is not installed in this test environment).
+- Full suite: **640 passed, 3 skipped**, identical across all 3 runs (skipped: Gradio-related
+  tests requiring gradio 5.50 which is not installed in this test environment).
 - All 411+ pre-existing tests continue to pass (deterministic reference worker path).
 - All real-agent-path tests pass, including the fault-injection suite through the production
-  Supervisor/transport/worker dispatch path.
+  Supervisor/transport/worker dispatch path, and the board HTTP E2E test (T8).
+- Protected-path check: `git diff --stat 82de560^..HEAD -- surface/board_web.py surface/board.py
+  surface/static surface/store.py surface/schema.py surface/stages` is empty across this
+  entire session's work (`82de560` is this session's first commit, T0). Board/store/schema are
+  untouched by the agent-backend integration.
 
 **Soak-test evidence (real HTTP against live `surface serve` process):**
 
