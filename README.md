@@ -11,8 +11,8 @@ worker is a replaceable, disposable process; the board is a thin renderer over t
 
 ## Current status
 
-Phases 0–5 are built and merged into `main`. This is no longer a proof of concept — it's
-a working runtime with a real (optional) coding-agent in the loop:
+Phases 0–5 are built and merged into `main`: a working runtime with a real (optional)
+coding-agent in the loop:
 
 - **SQLite-backed store** with immutable versions, provenance tracking, and DAG-aware
   staleness propagation (selecting a new upstream version marks descendants stale without
