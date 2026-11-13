@@ -304,11 +304,8 @@ ongoing/                     # per-phase build logs (STATE.md per phase)
 
 ## Status and limitations
 
-Phases 0 through 5 are built and merged into `main`: the store, async jobs and events, crash
-recovery, the web board with list, columns, and grid views, and real agent backends. Per-phase
-notes on what shipped, what review found, and what's still rough are in
-`ongoing/phase-1-2-harden-generalize/STATE.md`, `ongoing/phase-3-board-web-redesign/STATE.md`,
-and `ongoing/phase-4-visual-planning-extensions/STATE.md`.
+What's built: the store, async jobs and events, crash recovery, the web board with list,
+columns, and grid views, and real agent backends behind the board's actions.
 
 What isn't there yet:
 
