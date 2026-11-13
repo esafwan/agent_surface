@@ -250,6 +250,7 @@ it, and the last value used wins.
     surface resume ~/work/my-board # any project directory
     surface resume --no-browser    # print the URL only
     surface resume --with-agent    # also open your agent CLI in a new Terminal window (macOS)
+    surface resume --app-window    # open in a chromeless app-style window (macOS, needs Chrome/Edge/Brave/Chromium)
 
 If the board is already running, `resume` prints its URL and opens it. Otherwise it starts the
 board with the saved settings, after checking that the configured agent CLI is on your `PATH`.

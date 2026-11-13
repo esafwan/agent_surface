@@ -3,15 +3,26 @@
 import fcntl
 import json
 import os
+import shutil
 import socket
+import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
 from surface.agents.registry import BACKENDS
 from surface.cli import SurfaceCLI
 from surface.launch_profile import save_profile
-from surface.launcher import build_serve_argv, detect_live_runtime, resume
+from surface.launcher import (
+    _open_board,
+    build_app_window_argv,
+    build_serve_argv,
+    detect_live_runtime,
+    find_chromium_binary,
+    open_app_window,
+    resume,
+)
 from surface.store import Store
 
 
@@ -408,3 +419,227 @@ class TestResume:
         assert "url" not in opened
         captured = capsys.readouterr()
         assert "did not come up" in captured.out
+
+    def test_app_window_reaches_open_board_on_reattach(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / ".surface-board" / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        try:
+            _write_runtime_files(run_dir, port=port, pid=12345, token="tok123")
+            monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+
+            captured = {}
+
+            def _fake_open_board(url, project_dir, app_window):
+                captured["url"] = url
+                captured["project_dir"] = project_dir
+                captured["app_window"] = app_window
+
+            monkeypatch.setattr("surface.launcher._open_board", _fake_open_board)
+
+            def _fail_serve(*args, **kwargs):
+                raise AssertionError("serve() should not be invoked on a live runtime")
+
+            monkeypatch.setattr(SurfaceCLI, "serve", _fail_serve)
+
+            code = resume(tmp_path, app_window=True)
+            assert code == 0
+            assert captured["url"] == f"http://127.0.0.1:{port}/"
+            assert captured["app_window"] is True
+        finally:
+            sock.close()
+
+    def test_app_window_reaches_open_board_on_fresh_start(self, tmp_path, monkeypatch):
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+        })
+        store.conn.close()
+
+        run_dir = db_path.parent / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+
+        def _fake_serve(self, **kwargs):
+            _write_runtime_files(run_dir, port=port, pid=os.getpid(), token="tok123")
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        captured = {}
+
+        def _fake_open_board(url, project_dir, app_window):
+            captured["url"] = url
+            captured["app_window"] = app_window
+
+        monkeypatch.setattr("surface.launcher._open_board", _fake_open_board)
+
+        try:
+            code = resume(tmp_path, app_window=True, _poll_timeout=5.0)
+            assert code == 0
+            assert captured["url"] == f"http://127.0.0.1:{port}/"
+            assert captured["app_window"] is True
+        finally:
+            sock.close()
+
+
+class TestFindChromiumBinary:
+    def test_detection_order_respected(self, monkeypatch, tmp_path):
+        chrome_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        edge_path = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+        brave_path = Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
+        checked = []
+
+        def _fake_exists(path):
+            checked.append(str(path))
+            # Only the Brave path (checked third) exists -- confirm Chrome
+            # and Edge were checked first and both returned False.
+            return str(path) == str(brave_path)
+
+        monkeypatch.setattr(os.path, "exists", _fake_exists)
+
+        result = find_chromium_binary()
+        assert result == str(brave_path)
+        assert str(chrome_path) in checked
+        assert str(edge_path) in checked
+        assert checked.index(str(chrome_path)) < checked.index(str(brave_path))
+        assert checked.index(str(edge_path)) < checked.index(str(brave_path))
+
+    def test_falls_back_to_shutil_which(self, monkeypatch):
+        monkeypatch.setattr(os.path, "exists", lambda path: False)
+
+        def _fake_which(name):
+            return "/usr/bin/chromium-browser" if name == "chromium-browser" else None
+
+        monkeypatch.setattr(shutil, "which", _fake_which)
+
+        assert find_chromium_binary() == "/usr/bin/chromium-browser"
+
+    def test_returns_none_when_nothing_found(self, monkeypatch):
+        monkeypatch.setattr(os.path, "exists", lambda path: False)
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+
+        assert find_chromium_binary() is None
+
+
+class TestBuildAppWindowArgv:
+    def test_exact_argv(self, tmp_path):
+        profile_dir = tmp_path / "app-profile"
+        argv = build_app_window_argv("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                                      "http://127.0.0.1:1234/", profile_dir)
+        assert argv == [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "--app=http://127.0.0.1:1234/",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+
+
+class TestOpenAppWindow:
+    def test_no_binary_returns_false_without_popen(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("surface.launcher.find_chromium_binary", lambda: None)
+
+        def _fail_popen(*args, **kwargs):
+            raise AssertionError("Popen should not be called when no binary is found")
+
+        monkeypatch.setattr(subprocess, "Popen", _fail_popen)
+
+        assert open_app_window("http://127.0.0.1:1234/", tmp_path) is False
+
+    def test_success_creates_profile_dir_and_calls_popen(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("surface.launcher.find_chromium_binary", lambda: "/fake/chrome")
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, argv, **kwargs):
+                captured["argv"] = argv
+                captured["kwargs"] = kwargs
+
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+        result = open_app_window("http://127.0.0.1:1234/", tmp_path)
+        assert result is True
+
+        profile_dir = tmp_path / ".surface-board" / "app-profile"
+        assert profile_dir.is_dir()
+        assert captured["argv"] == [
+            "/fake/chrome",
+            "--app=http://127.0.0.1:1234/",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        assert captured["kwargs"]["start_new_session"] is True
+
+    def test_popen_oserror_returns_false(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("surface.launcher.find_chromium_binary", lambda: "/fake/chrome")
+
+        def _raise_oserror(*args, **kwargs):
+            raise OSError("exec failed")
+
+        monkeypatch.setattr(subprocess, "Popen", _raise_oserror)
+
+        assert open_app_window("http://127.0.0.1:1234/", tmp_path) is False
+
+
+class TestOpenBoard:
+    def test_app_window_true_and_succeeds_never_calls_webbrowser(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("surface.launcher.open_app_window", lambda url, pd: True)
+
+        def _fail_webbrowser_open(url):
+            raise AssertionError("webbrowser.open should not be called")
+
+        monkeypatch.setattr("webbrowser.open", _fail_webbrowser_open)
+
+        _open_board("http://127.0.0.1:1234/", tmp_path, True)
+
+    def test_app_window_true_and_fails_falls_back_with_note(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr("surface.launcher.open_app_window", lambda url, pd: False)
+
+        opened = {}
+        monkeypatch.setattr(
+            "webbrowser.open", lambda url: opened.setdefault("url", url)
+        )
+
+        _open_board("http://127.0.0.1:1234/", tmp_path, True)
+
+        assert opened["url"] == "http://127.0.0.1:1234/"
+        captured = capsys.readouterr()
+        assert "no Chromium-based browser found" in captured.out
+
+    def test_app_window_false_calls_webbrowser_directly(self, tmp_path, monkeypatch, capsys):
+        def _fail_open_app_window(*args, **kwargs):
+            raise AssertionError("open_app_window should not be invoked when app_window is False")
+
+        monkeypatch.setattr("surface.launcher.open_app_window", _fail_open_app_window)
+
+        opened = {}
+        monkeypatch.setattr(
+            "webbrowser.open", lambda url: opened.setdefault("url", url)
+        )
+
+        _open_board("http://127.0.0.1:1234/", tmp_path, False)
+
+        assert opened["url"] == "http://127.0.0.1:1234/"
+        captured = capsys.readouterr()
+        assert "no Chromium-based browser found" not in captured.out

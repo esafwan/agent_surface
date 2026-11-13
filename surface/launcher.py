@@ -274,6 +274,91 @@ def open_agent_terminal(project_dir: Path, backend_name: str) -> bool:
     return result.returncode == 0
 
 
+def find_chromium_binary() -> Optional[str]:
+    """Return the first installed Chromium-based browser binary, or None.
+
+    Checks well-known macOS install locations (both `/Applications` and
+    `~/Applications`) in a fixed preference order, then falls back to
+    `shutil.which` for Linux-style binary names.
+    """
+    candidates = [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+        "Chromium.app/Contents/MacOS/Chromium",
+    ]
+    for rel in candidates:
+        for base in (Path("/Applications"), Path.home() / "Applications"):
+            path = base / rel
+            if os.path.exists(path):
+                return str(path)
+
+    for name in ("google-chrome", "chromium", "chromium-browser"):
+        which = shutil.which(name)
+        if which:
+            return which
+
+    return None
+
+
+def build_app_window_argv(binary: str, url: str, profile_dir: Path) -> list[str]:
+    """Build the argv for launching `binary` as a chromeless app window."""
+    return [
+        binary,
+        f"--app={url}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+
+
+def open_app_window(url: str, project_dir: Path) -> bool:
+    """Open `url` in a chromeless Chromium-based app window.
+
+    Returns False (without attempting a subprocess) if no Chromium-based
+    browser is installed. The profile dir is persistent (not a throwaway
+    tmp dir) so the window remembers its size/position across launches --
+    Basic Auth credential caching isn't a real concern here since the
+    per-run token rotates every fresh `serve()`, so any cached password
+    just goes stale.
+    """
+    binary = find_chromium_binary()
+    if binary is None:
+        return False
+
+    profile_dir = project_dir / ".surface-board" / "app-profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    argv = build_app_window_argv(binary, url, profile_dir)
+    try:
+        subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return True
+
+
+def _open_board(url: str, project_dir: Path, app_window: bool) -> None:
+    """Open the board, preferring a chromeless app window when requested.
+
+    Falls back to the normal tabbed `webbrowser.open()` when `app_window`
+    is False, or when it's True but no Chromium-based browser was found
+    (printing a one-line note in that fallback case only).
+    """
+    if app_window:
+        if open_app_window(url, project_dir):
+            return
+        print(
+            "no Chromium-based browser found for --app-window; "
+            "opening in your default browser instead"
+        )
+    webbrowser.open(url)
+
+
 def _agent_handoff(project_dir: Path, profile: Optional[dict], with_agent: bool,
                     conn=None) -> None:
     """Print context + open an interactive terminal when requested.
@@ -302,7 +387,8 @@ def _agent_handoff(project_dir: Path, profile: Optional[dict], with_agent: bool,
 
 
 def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False,
-           db_override: Optional[str] = None, _poll_timeout: float = 10.0) -> int:
+           db_override: Optional[str] = None, _poll_timeout: float = 10.0,
+           app_window: bool = False) -> int:
     """Reattach to a live board, or start one from the saved launch profile.
 
     `db_override`, when given, takes precedence over the
@@ -342,7 +428,7 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
             print("(sign in with user 'surface', password: see "
                   f"{run_dir / 'token'}, or it will prompt you)")
             if not no_browser:
-                webbrowser.open(url)
+                _open_board(url, project_dir, app_window)
 
             if db_path.exists():
                 reattach_store = Store(str(db_path))
@@ -459,7 +545,7 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
             print("(sign in with user 'surface', password: see "
                   f"{run_dir / 'token'}, or it will prompt you)")
             if not no_browser:
-                webbrowser.open(live_url)
+                _open_board(live_url, project_dir, app_window)
         else:
             print(
                 f"board did not come up within {_poll_timeout}s; check the "

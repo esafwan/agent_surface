@@ -1668,6 +1668,10 @@ def main():
         "--with-agent", action="store_true",
         help="Hand off to an interactive agent after resume (not yet implemented)",
     )
+    resume_parser.add_argument(
+        "--app-window", action="store_true",
+        help="Open the board in a chromeless Chrome/Edge/Brave/Chromium app window",
+    )
 
     app_parser = subparsers.add_parser(
         "app", help="macOS launcher (.command file) operations"
@@ -1826,6 +1830,7 @@ def main():
             no_browser=args.no_browser,
             with_agent=args.with_agent,
             db_override=db_override,
+            app_window=args.app_window,
         )
         sys.exit(exit_code)
 
