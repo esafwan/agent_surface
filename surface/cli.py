@@ -32,6 +32,17 @@ from surface.transports.native_stream import NativeStreamTransport
 from surface.poller import Poller
 from surface.providers.image import MockImageProvider
 from surface.providers.video import MockVideoProvider
+from surface.launch_profile import (
+    LaunchProfileError,
+    load_profile,
+    merge_profile,
+    save_profile,
+)
+
+# Pre-existing default for --agent-timeout (serve). Kept as a module-level
+# constant so "no --agent-timeout flag and no saved profile value" resolves
+# to exactly the same timeout used before launch-profile wiring existed.
+DEFAULT_AGENT_TIMEOUT = 120
 
 # Configure logging for diagnostics (stderr)
 logging.basicConfig(
@@ -433,6 +444,19 @@ class SurfaceCLI:
                 )
                 store.conn.commit()
 
+                # Best-effort launch profile update: record the stage used so a
+                # later `serve` with no flags can pick it up. `stage` here has
+                # already been validated as a safe identifier above, so this
+                # should not fail; guard anyway so a profile hiccup never
+                # blocks project creation.
+                try:
+                    save_profile(
+                        store.conn,
+                        merge_profile(load_profile(store.conn), {"stage": stage}),
+                    )
+                except LaunchProfileError as e:
+                    logger.warning("Not persisting launch profile on init: %s", e)
+
                 self._json_output({
                     "ok": True,
                     "stage": stage,
@@ -734,7 +758,7 @@ class SurfaceCLI:
               renderer: str = "web",
               agent: Optional[str] = None,
               agent_model: Optional[str] = None,
-              agent_timeout: float = 120) -> None:
+              agent_timeout: Optional[float] = None) -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
         Architecture (single process):
@@ -821,14 +845,43 @@ class SurfaceCLI:
             poller = Poller(store, providers)
 
             # -----------------------------------------------------------------
+            # Launch profile: an explicit --agent/--agent-model/--agent-timeout
+            # flag always wins for *this* invocation and is also saved for
+            # next time; omitting a flag means "use whatever's saved", not
+            # "revert to the hardcoded default". `agent`/`agent_model`/
+            # `agent_timeout` are None here only when the corresponding flag
+            # was not passed (argparse sentinel), so merge_profile's
+            # "None means don't change" semantics apply directly.
+            # -----------------------------------------------------------------
+            saved_profile = load_profile(store.conn)
+            profile_updates = {
+                "agent": agent,
+                "agent_model": agent_model,
+                "agent_timeout": agent_timeout,
+            }
+            merged_profile = merge_profile(saved_profile, profile_updates)
+            try:
+                save_profile(store.conn, merged_profile)
+            except LaunchProfileError as e:
+                # Don't let an unregistered/legacy agent name (e.g. a custom
+                # worker_command setup) block serve; just skip persisting.
+                logger.warning("Not persisting launch profile: %s", e)
+
+            effective_agent = merged_profile.get("agent")
+            effective_agent_model = merged_profile.get("agent_model")
+            effective_agent_timeout = merged_profile.get("agent_timeout")
+            if effective_agent_timeout is None:
+                effective_agent_timeout = DEFAULT_AGENT_TIMEOUT
+
+            # -----------------------------------------------------------------
             # Supervisor over a real worker subprocess
             # -----------------------------------------------------------------
             if transport is None:
                 command, transport_timeout = self._build_worker_command(
                     base_command=worker_command,
-                    agent=agent,
-                    agent_model=agent_model,
-                    agent_timeout=agent_timeout,
+                    agent=effective_agent,
+                    agent_model=effective_agent_model,
+                    agent_timeout=effective_agent_timeout,
                 )
 
                 if worker_command is None and importlib.util.find_spec("surface.worker") is None:
@@ -1552,8 +1605,9 @@ def main():
         help="Model ID for the agent (e.g., claude-opus-4, claude-sonnet-4)",
     )
     serve_parser.add_argument(
-        "--agent-timeout", type=float, default=120,
-        help="Agent turn timeout in seconds (default: 120)",
+        "--agent-timeout", type=float, default=None,
+        help="Agent turn timeout in seconds (default: 120, or the saved "
+             "launch profile value if one exists)",
     )
 
     # =========================================================================
