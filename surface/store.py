@@ -218,46 +218,62 @@ class Store:
                         f"artifact {artifact_id!r}"
                     )
 
-        # Idempotency check: if source_event_id is provided, check if a version already exists for it
-        if source_event_id:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "SELECT * FROM versions WHERE artifact_id = ? AND source_event_id = ?",
-                (artifact_id, source_event_id),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                ver_dict = dict(existing)
-                # If selection is requested, ensure it's selected
-                stale_descendants = []
-                if select and artifact["selected_version_id"] != ver_dict["id"]:
-                    sel_res = self.select_version(
-                        artifact_id, ver_dict["id"],
-                        expected_selected_version_id=expected_selected_version_id,
-                    )
-                    if not sel_res.get("ok", True):
-                        return sel_res
-                    stale_descendants = sel_res.get("stale_descendants", [])
-                return {
-                    "ok": True,
-                    "version_id": ver_dict["id"],
-                    "version": ver_dict["n"],
-                    "stale_descendants": stale_descendants,
-                }
-
-        # Determine next version number n
+        # The idempotency check (does a version for this source_event_id
+        # already exist?) and computing the next version number `n` are both
+        # check-then-write: a Python-level SELECT followed, several lines
+        # later, by an INSERT. Like select_version's conflict check (see its
+        # comment), that is only atomic within this one process's lock -- a
+        # second OS process (CLI vs board server, two worker subprocesses)
+        # can interleave between the SELECT and the INSERT here. Both races
+        # are real:
+        #   - two processes both read MAX(n)=k and both try to INSERT n=k+1,
+        #     the loser hitting the UNIQUE(artifact_id, n) constraint;
+        #   - the same event delivered to two workers both find no existing
+        #     row for source_event_id and both insert a version for it.
+        # BEGIN IMMEDIATE grabs SQLite's write lock before either read runs,
+        # so a concurrent writer blocks (then retries its own read-after-
+        # lock, so it correctly sees the loser's committed row) instead of
+        # silently racing past it.
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT MAX(n) FROM versions WHERE artifact_id = ?", (artifact_id,)
-        )
-        max_n = cursor.fetchone()[0]
-        next_n = (max_n or 0) + 1
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if source_event_id:
+                cursor.execute(
+                    "SELECT * FROM versions WHERE artifact_id = ? AND source_event_id = ?",
+                    (artifact_id, source_event_id),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    self.conn.commit()
+                    ver_dict = dict(existing)
+                    # If selection is requested, ensure it's selected
+                    stale_descendants = []
+                    if select and artifact["selected_version_id"] != ver_dict["id"]:
+                        sel_res = self.select_version(
+                            artifact_id, ver_dict["id"],
+                            expected_selected_version_id=expected_selected_version_id,
+                        )
+                        if not sel_res.get("ok", True):
+                            return sel_res
+                        stale_descendants = sel_res.get("stale_descendants", [])
+                    return {
+                        "ok": True,
+                        "version_id": ver_dict["id"],
+                        "version": ver_dict["n"],
+                        "stale_descendants": stale_descendants,
+                    }
 
-        version_id = f"ver_{uuid.uuid4().hex[:8]}"
-        params_json = json.dumps(params) if params is not None else None
-        now = _now_iso()
+            # Determine next version number n
+            cursor.execute(
+                "SELECT MAX(n) FROM versions WHERE artifact_id = ?", (artifact_id,)
+            )
+            max_n = cursor.fetchone()[0]
+            next_n = (max_n or 0) + 1
 
-        with self.conn:
+            version_id = f"ver_{uuid.uuid4().hex[:8]}"
+            params_json = json.dumps(params) if params is not None else None
+            now = _now_iso()
+
             self.conn.execute(
                 """
                 INSERT INTO versions (id, artifact_id, n, content_ref, content_type, content, prompt, params_json, created_by, note, source_event_id, created_at)
@@ -306,6 +322,19 @@ class Store:
                     """,
                     (version_id, up_artifact_id, up_version_id, now),
                 )
+
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            # Lost the (artifact_id, n) or source_event_id race despite
+            # BEGIN IMMEDIATE -- shouldn't happen given the write lock is
+            # held for the whole check-then-write, but if it ever does,
+            # roll back and surface a clear conflict rather than a raw
+            # constraint-violation traceback.
+            self.conn.rollback()
+            return {"ok": False, "error": "conflict", "detail": "version write race"}
+        except Exception:
+            self.conn.rollback()
+            raise
 
         stale_descendants = []
         if select:
@@ -561,7 +590,7 @@ class Store:
         return stale_marked
 
     def compute_freshness(
-        self, artifact_id: str, _visited: Optional[set] = None
+        self, artifact_id: str, _cache: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Read-only, computed-on-every-call freshness check.
 
@@ -589,17 +618,29 @@ class Store:
         transitively); `"no_record"` means no `version_inputs` row exists
         for a real current dependency at all.
 
-        `_visited` guards against runaway recursion; `add_dependency`
-        already prevents cycles at the edge level, but this stays defensive.
+        `_cache` memoizes each artifact's result within one top-level call --
+        both so two sibling branches that share an ancestor (A depends on B
+        and C, both depend on D) each see D's real computed result instead
+        of the second visitor treating an in-progress/already-seen node as
+        trivially fresh, and as a defensive guard against runaway recursion
+        if a cycle ever slipped past `add_dependency`'s edge-level cycle
+        check. A node still being evaluated higher up the call chain (a true
+        cycle) is reported fresh for that one recursive edge only, to break
+        the loop -- it is not cached, so a later sibling re-evaluates it
+        properly.
         """
-        if _visited is None:
-            _visited = set()
-        if artifact_id in _visited:
-            # Already being evaluated up the call chain (or a cycle slipped
-            # through some other path) -- don't treat it as a new source of
-            # staleness, just stop recursing.
-            return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
-        _visited.add(artifact_id)
+        if _cache is None:
+            _cache = {}
+        if artifact_id in _cache:
+            cached = _cache[artifact_id]
+            if cached is None:
+                # A true cycle: this artifact is still being evaluated higher
+                # up this same call chain. Report fresh for this one
+                # recursive edge only (not cached) so the loop terminates,
+                # without poisoning the real result for this artifact.
+                return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            return cached
+        _cache[artifact_id] = None  # mark in-progress for cycle detection
 
         cursor = self.conn.cursor()
         cursor.execute(
@@ -607,7 +648,9 @@ class Store:
         )
         row = cursor.fetchone()
         if not row or not row["selected_version_id"]:
-            return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            result = {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            _cache[artifact_id] = result
+            return result
 
         selected_version_id = row["selected_version_id"]
 
@@ -621,7 +664,9 @@ class Store:
         current_upstream_ids = [r["upstream_artifact_id"] for r in cursor.fetchall()]
 
         if not current_upstream_ids:
-            return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            result = {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            _cache[artifact_id] = result
+            return result
 
         cursor.execute(
             "SELECT upstream_artifact_id, upstream_version_id FROM version_inputs WHERE version_id = ?",
@@ -652,18 +697,20 @@ class Store:
             current_upstream_version_id = up_row["selected_version_id"] if up_row else None
 
             direct_stale = current_upstream_version_id != recorded_upstream_version_id
-            upstream_freshness = self.compute_freshness(up_artifact_id, _visited=_visited)
+            upstream_freshness = self.compute_freshness(up_artifact_id, _cache=_cache)
 
             if direct_stale or not upstream_freshness["fresh"]:
                 stale_because.append(
                     {"upstream_artifact_id": up_artifact_id, "reason": "changed"}
                 )
 
-        return {
+        result = {
             "artifact_id": artifact_id,
             "fresh": len(stale_because) == 0,
             "stale_because": stale_because,
         }
+        _cache[artifact_id] = result
+        return result
 
     # -------------------------------------------------------------------------
     # Event Inbox

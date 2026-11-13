@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 import pytest
 from surface.store import Store
+from surface.schema import init_db
 
 
 def test_schema_creation_and_initialization():
@@ -32,6 +33,29 @@ def test_schema_creation_and_initialization():
     existing_tables = {r[0] for r in cursor.fetchall()}
     for t in tables:
         assert t in existing_tables
+
+
+def test_schema_upgrade_bumps_stored_version(tmp_path):
+    """Regression: an on-disk DB created under an older SCHEMA_VERSION must
+    have its stored 'schema_version' row updated when opened under a newer
+    one, not just gain the new tables via CREATE TABLE IF NOT EXISTS while
+    the recorded version stays frozen at the old value forever."""
+    db_path = tmp_path / "old.sqlite3"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE runtime (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "INSERT INTO runtime (key, value) VALUES ('schema_version', '1')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = init_db(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM runtime WHERE key = 'schema_version'")
+    row = cursor.fetchone()
+    assert row is not None
+    assert row["value"] == "2"
 
 
 def test_artifact_crud_and_locks():

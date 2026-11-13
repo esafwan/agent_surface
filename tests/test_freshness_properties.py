@@ -291,6 +291,51 @@ def test_stale_because_names_the_right_upstream():
     )
 
 
+def test_diamond_shared_stale_ancestor_reported_on_both_branches():
+    """Regression: A depends on B and C, both depend on D (diamond shape). If D
+    goes stale, A's stale_because must name BOTH B and C, not just whichever
+    branch compute_freshness happens to recurse into first.
+
+    A single shared "visited" set that treats a second visit to an
+    in-progress/already-seen node as trivially fresh would make the second
+    branch (C) silently drop out of A's stale_because even though C is
+    really stale too -- caught here by asserting both are present.
+    """
+    store = Store(":memory:")
+
+    store.create_artifact(id="D", stage="test", title="D")
+    store.create_artifact(id="B", stage="test", title="B")
+    store.create_artifact(id="C", stage="test", title="C")
+    store.create_artifact(id="A", stage="test", title="A")
+
+    store.add_dependency("D", "B")
+    store.add_dependency("D", "C")
+    store.add_dependency("B", "A")
+    store.add_dependency("C", "A")
+
+    store.put_version("D", content="D v1", select=True)
+    store.put_version("B", content="B v1", select=True)
+    store.put_version("C", content="C v1", select=True)
+    store.put_version("A", content="A v1", select=True)
+
+    assert store.compute_freshness("A")["fresh"] is True
+
+    # Change D -> B and C both become stale, and A transitively through both.
+    store.put_version("D", content="D v2", select=True)
+
+    freshness_B = store.compute_freshness("B")
+    freshness_C = store.compute_freshness("C")
+    assert freshness_B["fresh"] is False
+    assert freshness_C["fresh"] is False
+
+    freshness_A = store.compute_freshness("A")
+    assert freshness_A["fresh"] is False
+    stale_ids = _stale_because_ids(freshness_A)
+    assert stale_ids == {"B", "C"}, (
+        f"A's stale_because should name both B and C, got {freshness_A['stale_because']}"
+    )
+
+
 def test_missing_provenance_record_is_not_silently_fresh():
     """A real dependency with no version_inputs row must not read as fresh.
 
