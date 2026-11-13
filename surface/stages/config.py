@@ -19,6 +19,58 @@ class ActionPermissionError(StageConfigError):
     pass
 
 
+_BOARD_VIEW_STRING_KEYS = ("group_by", "media_field", "title_field")
+
+
+def _normalize_board_view(stage_id: str, value: Any) -> Optional[Dict[str, Any]]:
+    """
+    Normalize a board_view value from JSON into a dict with a 'type' key.
+
+    Accepts either a bare string (legacy form, e.g. "columns") or an object
+    (e.g. {"type": "grid", "group_by": "status"}). Returns None if absent.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        value = {"type": value}
+    elif not isinstance(value, dict):
+        raise StageValidationError(
+            f"Stage '{stage_id}' board_view must be a string or an object, "
+            f"got {type(value).__name__}"
+        )
+    else:
+        value = dict(value)
+
+    if "type" not in value:
+        raise StageValidationError(
+            f"Stage '{stage_id}' board_view object is missing required 'type' key "
+            f"(valid values: {', '.join(sorted(StageConfig.VALID_BOARD_VIEWS))})"
+        )
+
+    view_type = value["type"]
+    if not isinstance(view_type, str) or view_type not in StageConfig.VALID_BOARD_VIEWS:
+        raise StageValidationError(
+            f"Stage '{stage_id}' has invalid board_view type: '{view_type}' "
+            f"(valid values: {', '.join(sorted(StageConfig.VALID_BOARD_VIEWS))})"
+        )
+
+    for key in _BOARD_VIEW_STRING_KEYS:
+        if key in value and not isinstance(value[key], str):
+            raise StageValidationError(
+                f"Stage '{stage_id}' board_view '{key}' must be a string"
+            )
+
+    if "badge_fields" in value:
+        badge_fields = value["badge_fields"]
+        if not isinstance(badge_fields, list) or not all(isinstance(f, str) for f in badge_fields):
+            raise StageValidationError(
+                f"Stage '{stage_id}' board_view 'badge_fields' must be a list of strings"
+            )
+
+    return value
+
+
 class Stage:
     def __init__(self, data: Dict[str, Any]):
         self.id: str = data["id"]
@@ -28,7 +80,9 @@ class Stage:
         self.approval_required: bool = data.get("approval_required", False)
         self.generation: Optional[Dict[str, Any]] = data.get("generation")
         self.form_schema: Optional[Dict[str, Any]] = data.get("form_schema")
-        self.board_view: Optional[str] = data.get("board_view")
+        self.board_view: Optional[Dict[str, Any]] = _normalize_board_view(
+            self.id, data.get("board_view")
+        )
         self.raw: Dict[str, Any] = data
 
     def is_action_allowed(self, action: str) -> bool:
@@ -49,7 +103,7 @@ class StageConfig:
         "approve", "reopen", "cancel", "lock", "unlock",
         "bulk_regenerate", "message"
     }
-    VALID_BOARD_VIEWS = {"columns"}
+    VALID_BOARD_VIEWS = {"list", "columns", "grid"}
 
     def __init__(self, data: Dict[str, Any]):
         self.raw: Dict[str, Any] = data
@@ -119,17 +173,7 @@ class StageConfig:
             if stage.form_schema is not None:
                 self._validate_form_schema(stage_id, stage.form_schema)
 
-            # Validate board_view if present
-            if stage.board_view is not None:
-                if not isinstance(stage.board_view, str):
-                    raise StageValidationError(
-                        f"Stage '{stage_id}' board_view must be a string"
-                    )
-                if stage.board_view not in self.VALID_BOARD_VIEWS:
-                    raise StageValidationError(
-                        f"Stage '{stage_id}' has invalid board_view: '{stage.board_view}' "
-                        f"(valid values: {', '.join(sorted(self.VALID_BOARD_VIEWS))})"
-                    )
+            # board_view shape is validated and normalized in Stage.__init__
 
         # Validate DAG (Dependency Cycle Detection)
         self._validate_dag()

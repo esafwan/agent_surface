@@ -566,7 +566,7 @@ def test_task_board_preset_returns_columns_board_view(task_board_client):
     assert len(body["stages"]) == 1
     stage = body["stages"][0]
     assert stage["stage_id"] == "tasks"
-    assert stage["board_view"] == "columns"
+    assert stage["board_view"] == {"type": "columns"}
 
 
 def test_task_board_groups_artifacts_by_status(task_board_store, task_board_config):

@@ -185,7 +185,7 @@ def test_board_view_field():
         ]
     })
     stage = config.get_stage("tasks")
-    assert stage.board_view == "columns"
+    assert stage.board_view == {"type": "columns"}
 
     # Missing board_view (optional, should be None)
     config_no_view = StageConfig({
@@ -214,6 +214,73 @@ def test_board_view_field():
                 }
             ]
         })
+
+
+def _config_with_board_view(board_view):
+    return StageConfig({
+        "id": "bv",
+        "stages": [
+            {
+                "id": "tasks",
+                "artifact_type": "text",
+                "allowed_actions": ["approve"],
+                "board_view": board_view,
+            }
+        ]
+    })
+
+
+def test_board_view_object_form_accepted_as_is():
+    """Object-form board_view is accepted and kept as a dict."""
+    stage = _config_with_board_view(
+        {"type": "grid", "media_field": "img", "group_by": "status"}
+    ).get_stage("tasks")
+    assert stage.board_view == {"type": "grid", "media_field": "img", "group_by": "status"}
+
+
+def test_board_view_object_form_optional_fields_may_be_omitted():
+    """grid/columns/list objects work without group_by and friends."""
+    for view_type in ("list", "columns", "grid"):
+        stage = _config_with_board_view({"type": view_type}).get_stage("tasks")
+        assert stage.board_view == {"type": view_type}
+
+
+def test_board_view_object_form_badge_fields_validated():
+    stage = _config_with_board_view(
+        {"type": "grid", "title_field": "title", "badge_fields": ["status", "owner"]}
+    ).get_stage("tasks")
+    assert stage.board_view["badge_fields"] == ["status", "owner"]
+
+    with pytest.raises(StageValidationError):
+        _config_with_board_view({"type": "grid", "badge_fields": "status"})
+    with pytest.raises(StageValidationError):
+        _config_with_board_view({"type": "grid", "badge_fields": [1, 2]})
+
+
+def test_board_view_string_fields_must_be_strings_when_present():
+    with pytest.raises(StageValidationError):
+        _config_with_board_view({"type": "grid", "group_by": 5})
+    with pytest.raises(StageValidationError):
+        _config_with_board_view({"type": "grid", "media_field": ["img"]})
+    with pytest.raises(StageValidationError):
+        _config_with_board_view({"type": "grid", "title_field": None})
+
+
+def test_board_view_object_missing_type_raises():
+    with pytest.raises(StageValidationError, match="type"):
+        _config_with_board_view({"group_by": "status"})
+
+
+def test_board_view_unknown_type_raises():
+    with pytest.raises(StageValidationError, match="invalid board_view type"):
+        _config_with_board_view({"type": "kanban"})
+
+
+def test_board_view_wrong_container_type_raises():
+    with pytest.raises(StageValidationError):
+        _config_with_board_view(["columns"])
+    with pytest.raises(StageValidationError):
+        _config_with_board_view(42)
 
 
 def test_task_artifact_type():
