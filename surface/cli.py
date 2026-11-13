@@ -1669,6 +1669,22 @@ def main():
         help="Hand off to an interactive agent after resume (not yet implemented)",
     )
 
+    app_parser = subparsers.add_parser(
+        "app", help="macOS launcher (.command file) operations"
+    )
+    app_subparsers = app_parser.add_subparsers(dest="app_command", required=True)
+    app_create_parser = app_subparsers.add_parser(
+        "create", help="Write a double-clickable macOS .command launcher into PROJECT_DIR"
+    )
+    app_create_parser.add_argument(
+        "project_dir", nargs="?", default=".",
+        help="Project directory (default: current directory)",
+    )
+    app_create_parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing launcher script",
+    )
+
     # =========================================================================
     # Convenience Mode (SPEC section 35)
     # =========================================================================
@@ -1812,6 +1828,26 @@ def main():
             db_override=db_override,
         )
         sys.exit(exit_code)
+
+    elif args.command == "app":
+        if args.app_command == "create":
+            from surface.launcher import write_command_script
+
+            try:
+                written = write_command_script(Path(args.project_dir), force=args.force)
+            except FileExistsError:
+                print(
+                    "'Open Surface Board.command' already exists; use --force to overwrite"
+                )
+                sys.exit(1)
+            print(written)
+            print(
+                "Note: this launcher only works reliably on this machine (macOS "
+                "Gatekeeper blocks launchers that cross machines via "
+                "zip/AirDrop/download — regenerate with 'surface app create' on "
+                "another machine instead of copying this file). Consider adding "
+                "'Open Surface Board.command' to your .gitignore."
+            )
 
     else:
         parser.print_help()

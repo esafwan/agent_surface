@@ -23,7 +23,7 @@ surface = "surface.cli:main"
 packages = ["surface", "surface.transports", "surface.providers", "surface.stages"]
 
 [tool.setuptools.package-data]
-surface = ["stages/*.json", "static/*"]
+surface = ["stages/*.json", "static/*", "templates/*.command"]
 
 [tool.pytest.ini_options]
 markers = [

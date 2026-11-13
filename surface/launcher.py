@@ -16,11 +16,14 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import socket
+import sys
 import time
 import webbrowser
 from contextlib import contextmanager
 from pathlib import Path
+from string import Template
 from typing import Optional
 
 from surface.agents.registry import BACKENDS, is_available
@@ -266,3 +269,61 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
         agent_timeout=profile.get("agent_timeout"),
     )
     return 0
+
+
+def render_command_script(fallback_bin: str) -> str:
+    """Render the bundled `.command` launcher template.
+
+    `fallback_bin` is substituted for the single `$fallback_bin` placeholder;
+    every other `$` in the template is written doubled (`$$`) so
+    `string.Template` emits it as a literal single `$`, preserving the
+    shell script's own `$(...)`/`${...}` syntax untouched.
+    """
+    template_path = Path(__file__).parent / "templates" / "launcher.command"
+    text = template_path.read_text(encoding="utf-8")
+    return Template(text).substitute(fallback_bin=fallback_bin)
+
+
+def _resolve_fallback_bin() -> str:
+    """Best-effort absolute path to the `surface` binary for the template.
+
+    Preference order:
+      1. `shutil.which("surface")` -- works whether this process was
+         started via the installed console-script entry point or found on
+         PATH some other way; it's the simplest, most portable case.
+      2. `Path(sys.argv[0]).resolve()` -- when `surface` isn't on PATH
+         right now but this process was clearly invoked as that script
+         (argv[0] ends with "surface"), trust how it was actually invoked.
+      3. `sys.executable -m surface.cli` -- last-resort fallback so the
+         template always has *something* runnable, even if neither of the
+         above panned out (e.g. invoked via `python -m`).
+    """
+    which = shutil.which("surface")
+    if which:
+        return str(Path(which).resolve())
+
+    argv0 = Path(sys.argv[0])
+    if argv0.name == "surface":
+        resolved = argv0.resolve()
+        if resolved.exists():
+            return str(resolved)
+
+    return f"{sys.executable} -m surface.cli"
+
+
+def write_command_script(project_dir: Path, force: bool = False) -> Path:
+    """Write a double-clickable `Open Surface Board.command` launcher.
+
+    Raises `FileExistsError` if the target already exists and `force` is
+    False. Sets the file mode to 0o755 (executable) either way.
+    """
+    project_dir = Path(project_dir).resolve()
+    target = project_dir / "Open Surface Board.command"
+    if target.exists() and not force:
+        raise FileExistsError(str(target))
+
+    fallback_bin = _resolve_fallback_bin()
+    script = render_command_script(fallback_bin)
+    target.write_text(script, encoding="utf-8")
+    os.chmod(target, 0o755)
+    return target
