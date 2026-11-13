@@ -310,7 +310,20 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
     global `--db` flag taking precedence over the project-dir-derived
     default). The runtime directory follows the resolved db path's
     location (`<db parent>/run`), same as `serve()`'s own `runtime_dir()`.
+
+    `serve()` never returns (it blocks running the supervisor loop until
+    interrupted), so this function's own `print()` calls -- the board URL
+    chief among them -- are the only chance the caller gets to see them.
+    When stdout isn't a tty (piped to a file, `nohup`, a log collector),
+    Python fully buffers it instead of line-buffering, so those prints
+    would otherwise sit unflushed for the rest of the process's life.
+    Force line buffering so the URL is never silently lost.
     """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError, OSError):
+        pass  # not a real stream we can reconfigure (e.g. piped/mocked) -- best effort only
+
     project_dir = Path(project_dir).resolve()
 
     profile: Optional[dict] = None
