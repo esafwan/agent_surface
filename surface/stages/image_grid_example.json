@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "id": "image_grid_example",
+  "title": "Image Grid Example",
+  "stages": [
+    {
+      "id": "shots",
+      "artifact_type": "image",
+      "allowed_actions": ["regenerate", "revise", "select_version", "approve", "cancel"],
+      "approval_required": true,
+      "board_view": {
+        "type": "grid",
+        "group_by": "status",
+        "media_field": "media_url",
+        "title_field": "title"
+      }
+    }
+  ]
+}
