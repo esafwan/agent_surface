@@ -44,6 +44,11 @@ from surface.launch_profile import (
 # to exactly the same timeout used before launch-profile wiring existed.
 DEFAULT_AGENT_TIMEOUT = 120
 
+# The global --db flag's default; used to detect whether a user explicitly
+# passed --db (vs. the argparse default) when dispatching `resume`, since
+# resume() otherwise derives the db path from PROJECT_DIR.
+DEFAULT_DB_PATH = ".surface-board/state.sqlite3"
+
 # Configure logging for diagnostics (stderr)
 logging.basicConfig(
     level=logging.INFO,
@@ -1388,7 +1393,7 @@ def main():
     # Global options
     parser.add_argument(
         "--db",
-        default=".surface-board/state.sqlite3",
+        default=DEFAULT_DB_PATH,
         help="Path to SQLite store (default: .surface-board/state.sqlite3)",
     )
 
@@ -1645,6 +1650,26 @@ def main():
     )
 
     # =========================================================================
+    # Resume (Surface App launcher)
+    # =========================================================================
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="Reattach to a live board, or start one from the saved launch profile",
+    )
+    resume_parser.add_argument(
+        "project_dir", nargs="?", default=".",
+        help="Project directory (default: current directory)",
+    )
+    resume_parser.add_argument(
+        "--no-browser", action="store_true",
+        help="Do not open the board URL in a browser",
+    )
+    resume_parser.add_argument(
+        "--with-agent", action="store_true",
+        help="Hand off to an interactive agent after resume (not yet implemented)",
+    )
+
+    # =========================================================================
     # Convenience Mode (SPEC section 35)
     # =========================================================================
     render_parser = subparsers.add_parser(
@@ -1772,6 +1797,21 @@ def main():
 
     elif args.command == "answer":
         cli.answer(args.handle, value=args.value)
+
+    elif args.command == "resume":
+        from surface.launcher import resume as launcher_resume
+
+        # args.db carries the global default when --db was not explicitly
+        # passed; only forward it as an override when it differs, so
+        # resume() falls back to deriving the db path from project_dir.
+        db_override = args.db if args.db != DEFAULT_DB_PATH else None
+        exit_code = launcher_resume(
+            Path(args.project_dir),
+            no_browser=args.no_browser,
+            with_agent=args.with_agent,
+            db_override=db_override,
+        )
+        sys.exit(exit_code)
 
     else:
         parser.print_help()

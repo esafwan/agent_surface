@@ -1,14 +1,26 @@
 # Agent Surface Board
 
-**A browser review board your coding agent works on, so you aren't stuck in a chat window.**
-You open a tab and see the work: a draft, a set of images, a task list, a data migration.
-You approve, revise, or comment, and the agent picks up your feedback in the background.
-Everything lives in a local SQLite file, so closing the tab, rebooting, or crashing the
-agent loses nothing.
+**Task-shaped UI for agent work: the interface takes the shape of the job, not the other way around.**
+
+Most agent work is forced into one of two shapes: a chat window or a command-line loop. Some
+jobs fit that. Many don't. Reviewing a poem wants a single box and a sticky note. Migrating a
+dataset wants three panes: source rows, a field-by-field comparison, and the live target.
+Triaging tasks wants columns. Agent Surface lets each job get the UI it actually needs.
+
+The shape comes from a small JSON **stage config**, not from hardcoded screens. The config
+declares the actions, the form fields (`form_schema`), and the layout (`board_view`: list,
+columns, or grid). A worker plugs in behind it. Both [example surfaces](#what-you-can-build),
+a one-box haiku generator and a three-pane migration console, run on the same skeleton and
+differ only in config and worker. [Planning a New Surface in `SKILL.md`](SKILL.md) is the
+step-by-step method an agent follows to shape a new one for a new use case.
+
+Under every shape is the same durable core. You approve, revise, or comment in the browser,
+and the agent picks up your feedback in the background. Every change is an immutable version
+in a local SQLite file, so closing the tab, rebooting, or crashing the agent loses nothing.
 
 It's for **developers who drive coding agents** (Codex, opencode, agy) and want a reviewable,
-versioned place for the agent's output. You don't have to build a custom frontend for each
-workflow: you describe the workflow in a small JSON "stage config" and the board renders it.
+versioned surface for the agent's output that fits the task, without building a custom
+frontend from scratch each time.
 
 ![Migration surface: source rows, field-by-field comparison, and live target dataset](docs/images/surface_migration.webp)
 
