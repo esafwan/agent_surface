@@ -21,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from contextlib import contextmanager
@@ -301,7 +302,7 @@ def _agent_handoff(project_dir: Path, profile: Optional[dict], with_agent: bool,
 
 
 def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False,
-           db_override: Optional[str] = None) -> int:
+           db_override: Optional[str] = None, _poll_timeout: float = 10.0) -> int:
     """Reattach to a live board, or start one from the saved launch profile.
 
     `db_override`, when given, takes precedence over the
@@ -405,13 +406,56 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
         from surface.cli import SurfaceCLI  # local import: avoid any import cycle
 
         cli = SurfaceCLI(db_path=str(db_path))
-        cli.serve(
-            db=str(db_path),
-            stage=profile.get("stage") or "movie",
-            agent=profile.get("agent"),
-            agent_model=profile.get("agent_model"),
-            agent_timeout=profile.get("agent_timeout"),
-        )
+
+        serve_error: list[BaseException] = []
+
+        def _run_serve() -> None:
+            try:
+                cli.serve(
+                    db=str(db_path),
+                    stage=profile.get("stage") or "movie",
+                    agent=profile.get("agent"),
+                    agent_model=profile.get("agent_model"),
+                    agent_timeout=profile.get("agent_timeout"),
+                )
+            except BaseException as exc:  # noqa: BLE001 - re-surfaced after join
+                serve_error.append(exc)
+
+        serve_thread = threading.Thread(target=_run_serve, name="surface-serve")
+        serve_thread.start()
+
+        # Poll for the board to come up so we can print/open its URL --
+        # serve() needs a moment to reserve a port and write the
+        # token/port/pid files before detect_live_runtime() will see it.
+        # The resume lock is still held here (we're inside the `with
+        # _resume_lock(...)` block) for the whole wait, same as before.
+        deadline = time.monotonic() + _poll_timeout
+        live_url: Optional[str] = None
+        while time.monotonic() < deadline:
+            live_url = detect_live_runtime(project_dir)
+            if live_url is not None:
+                break
+            if not serve_thread.is_alive():
+                # serve() exited (crashed) before ever coming up -- no
+                # point polling further.
+                break
+            time.sleep(0.2)
+
+        if live_url is not None:
+            print(live_url)
+            print("(sign in with user 'surface', password: see "
+                  f"{run_dir / 'token'}, or it will prompt you)")
+            if not no_browser:
+                webbrowser.open(live_url)
+        else:
+            print(
+                f"board did not come up within {_poll_timeout}s; check the "
+                "logs above for errors"
+            )
+
+        serve_thread.join()
+        if serve_error:
+            raise serve_error[0]
         return 0
 
 

@@ -286,3 +286,125 @@ class TestResume:
         assert call_count["n"] == 1, (
             f"serve() was invoked {call_count['n']} times in total; expected exactly 1"
         )
+
+    def test_fresh_start_polls_and_opens_browser_before_serve_releases(
+        self, tmp_path, monkeypatch
+    ):
+        """When no live runtime exists yet, resume() must start serve() in
+        the background, poll detect_live_runtime() until it comes up, and
+        open the browser to the real URL -- all before the (still-blocked)
+        serve() call itself ever returns.
+        """
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+        })
+        store.conn.close()
+
+        run_dir = db_path.parent / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+
+        serve_release = threading.Event()
+
+        def _fake_serve(self, **kwargs):
+            # Simulate what a real serve() does before it starts listening
+            # forever: reserve a port, write token/port/pid files.
+            _write_runtime_files(run_dir, port=port, pid=os.getpid(), token="tok123")
+            serve_release.wait(timeout=5)
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        opened = {}
+        monkeypatch.setattr(
+            "webbrowser.open", lambda url: opened.setdefault("url", url)
+        )
+
+        try:
+            results = []
+
+            def _run_resume():
+                results.append(resume(tmp_path, _poll_timeout=5.0))
+
+            t = threading.Thread(target=_run_resume)
+            t.start()
+
+            # The browser-open must happen while serve() is still blocked
+            # (i.e. before serve_release is set).
+            deadline = __import__("time").monotonic() + 5
+            while "url" not in opened and __import__("time").monotonic() < deadline:
+                __import__("time").sleep(0.05)
+
+            assert opened.get("url") == f"http://127.0.0.1:{port}/"
+            assert not serve_release.is_set()
+            assert t.is_alive(), (
+                "resume() returned before the serve thread was released -- "
+                "it must join() and block until serve() actually finishes"
+            )
+
+            serve_release.set()
+            t.join(timeout=5)
+            assert not t.is_alive()
+            assert results == [0]
+        finally:
+            sock.close()
+
+    def test_fresh_start_timeout_when_board_never_comes_up(self, tmp_path, monkeypatch, capsys):
+        """If serve() never manages to write the port/pid files (e.g. it
+        failed to start), resume() must not hang forever -- it should print
+        a clear timeout message and still join the serve thread cleanly.
+        """
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+        })
+        store.conn.close()
+
+        def _fake_serve(self, **kwargs):
+            # Never writes port/pid files -- simulates a startup failure --
+            # and returns fairly quickly (short block, not blocking forever).
+            __import__("time").sleep(0.3)
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        opened = {}
+        monkeypatch.setattr(
+            "webbrowser.open", lambda url: opened.setdefault("url", url)
+        )
+
+        code = resume(tmp_path, _poll_timeout=0.5)
+        assert code == 0
+        assert "url" not in opened
+        captured = capsys.readouterr()
+        assert "did not come up" in captured.out
