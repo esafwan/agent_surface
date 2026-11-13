@@ -580,6 +580,61 @@ label.check input { width: auto; }
   padding-top: var(--s2);
 }
 
+/* --- grid layout (board_view type "grid") -------------------------------- */
+.grid-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--s4);
+  padding: var(--s2) 0;
+}
+
+.grid-item {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.grid-item.is-approved { border-left: 3px solid var(--ok); }
+
+.grid-item .card-head { margin-bottom: 0; }
+
+.grid-item .card-title { font-size: var(--fs-body); }
+
+.grid-media {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  background: var(--bg-sunken);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.grid-media img,
+.grid-media video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.grid-version {
+  width: 100%;
+  font: inherit;
+  font-size: var(--fs-micro);
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: var(--s1) var(--s2);
+}
+
 @media (max-width: 520px) {
   .wrap { padding: var(--s5) var(--s4) var(--s7); }
   .card { padding: var(--s4); }

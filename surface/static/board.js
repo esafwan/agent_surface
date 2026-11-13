@@ -784,7 +784,7 @@ function buildDependenciesFold(card) {
 // requires every one of them approved -- the field lies in a shipped
 // preset, so nothing here trusts it.
 function cardAsk(card, stage, minimal) {
-  if (minimal || (stage && stage.board_view === "columns")) return null;
+  if (minimal || (stage && stage.board_view && stage.board_view.type === "columns")) return null;
 
   const A = card.allowed_actions || [];
   const has = (a) => A.indexOf(a) >= 0;
@@ -1049,6 +1049,95 @@ function buildColumnView(stage) {
   return container;
 }
 
+// Default flat list: one full card per artifact. Returns a DocumentFragment
+// rather than a wrapper div so the cards land directly in #cards exactly as
+// the old inline loop placed them (no extra DOM node, no layout change).
+function buildListView(stage) {
+  const frag = document.createDocumentFragment();
+  stage.artifacts.forEach((card) => frag.appendChild(buildCard(card, false, stage)));
+  return frag;
+}
+
+// Grid version choice per artifact, client-side only. Survives re-renders
+// (render() rebuilds the DOM on every fingerprint change) but is never sent
+// to the server: it changes what the tile DISPLAYS, not the selected version.
+const gridVersionChoice = new Map();
+
+// Grid of tiles for image/video artifacts. Anything else falls back to the
+// minimal card so text/form/none artifacts are never blank in this view.
+function buildGridView(stage) {
+  const container = el("div", "grid-container");
+  stage.artifacts.forEach((card) => {
+    if (card.content_kind !== "image" && card.content_kind !== "video") {
+      container.appendChild(buildCard(card, true, stage));
+      return;
+    }
+
+    const tile = el("article", "grid-item" + (card.status === "approved" ? " is-approved" : ""));
+    const head = el("div", "card-head");
+    head.appendChild(el("h2", "card-title", card.title));
+    head.appendChild(el("span", "chip-status st-" + card.status, card.status));
+    tile.appendChild(head);
+
+    const media = el("div", "grid-media");
+    const mediaNode = el(card.content_kind === "image" ? "img" : "video");
+    if (card.content_kind === "image") {
+      mediaNode.alt = card.title;
+      mediaNode.loading = "lazy";
+    } else {
+      mediaNode.controls = true;
+      mediaNode.muted = true;
+      mediaNode.preload = "metadata";
+    }
+    // A missing file shows the media_ref label instead of a broken glyph;
+    // the node is hidden rather than removed so a version switch can recover.
+    const missing = el("div", "media-missing", card.media_ref || "media unavailable");
+    missing.hidden = true;
+    const showMedia = () => { mediaNode.hidden = false; missing.hidden = true; };
+    mediaNode.onload = showMedia;
+    mediaNode.onloadeddata = showMedia;
+    mediaNode.onerror = () => { mediaNode.hidden = true; missing.hidden = false; };
+    media.appendChild(mediaNode);
+    media.appendChild(missing);
+    tile.appendChild(media);
+
+    const versions = card.all_versions || [];
+    const chosen = gridVersionChoice.get(card.artifact_id);
+    const chosenKnown = versions.some((v) => v.version_id === chosen);
+    const currentId = chosenKnown ? chosen : (card.selected_version && card.selected_version.version_id);
+    mediaNode.src = chosenKnown ? "/api/media/" + chosen : card.media_url;
+
+    if (versions.length > 1) {
+      const sel = el("select", "grid-version");
+      sel.setAttribute("aria-label", "Version shown in this tile");
+      versions.forEach((v) => {
+        const label = `v${v.version_num}` + (v.age ? ` · ${v.age}` : "") + (v.is_selected ? " (current)" : "");
+        const opt = el("option", null, label);
+        opt.value = v.version_id;
+        sel.appendChild(opt);
+      });
+      sel.value = currentId || versions[0].version_id;
+      sel.onchange = () => {
+        gridVersionChoice.set(card.artifact_id, sel.value);
+        mediaNode.src = "/api/media/" + sel.value;
+      };
+      tile.appendChild(sel);
+    }
+
+    container.appendChild(tile);
+  });
+  return container;
+}
+
+// Layout dispatch. Keys are the board_view.type values the server emits
+// (see surface/stages/config.py _normalize_board_view). render() picks one
+// with stage.board_view.type, defaulting to "list" when absent or unknown.
+const VIEWS = {
+  list: buildListView,
+  columns: buildColumnView,
+  grid: buildGridView,
+};
+
 // --- top level -------------------------------------------------------------
 
 function drawTabs() {
@@ -1106,12 +1195,9 @@ function render(next, force) {
   if (!stage || !stage.artifacts.length) {
     cards.appendChild(el("p", "empty-stage", "No artifacts in this stage yet."));
   } else {
-    // Check if this stage uses column view
-    if (stage.board_view === "columns") {
-      cards.appendChild(buildColumnView(stage));
-    } else {
-      stage.artifacts.forEach((card) => cards.appendChild(buildCard(card, false, stage)));
-    }
+    const viewName = (stage.board_view && stage.board_view.type) || "list";
+    const buildView = VIEWS[viewName] || VIEWS.list;
+    cards.appendChild(buildView(stage));
   }
 
   paintInflight();

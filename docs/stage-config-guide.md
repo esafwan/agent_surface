@@ -106,7 +106,9 @@ Each object in the `stages` array MUST have an `id` and MAY have:
 | `depends_on` | array of strings | `[]` | List of stage IDs this stage depends on. Each ID MUST reference an existing stage. No cycles allowed. |
 | `allowed_actions` | array of strings | `[]` | User-triggerable actions. Valid values below. |
 | `approval_required` | boolean | `false` | If `true`, this stage MUST be approved before board completion. |
-| `board_view` | string | none | Optional board rendering mode. Valid values: `"columns"`. When set to `"columns"`, artifacts are rendered grouped by status in columns instead of a flat list. |
+| `board_view` | object | none | Optional board rendering mode, as an object with a `type` key: `{"type": "list"}`, `{"type": "columns"}`, or `{"type": "grid", "group_by": ..., "media_field": ..., "title_field": ..., "badge_fields": [...]}`. `"list"` is the flat default; `"columns"` groups artifacts by status in columns; `"grid"` renders image and video artifacts as tiles with a per-tile version switcher (the grid's `group_by`, `media_field`, `title_field` and `badge_fields` options are accepted by config validation but not yet read by the renderer). |
+
+A bare string such as `"board_view": "columns"` is still accepted for backward compatibility. It is normalized automatically to the object form (`{"type": "columns"}`) when the stage is loaded, so existing presets keep working unchanged. New configs should use the object form, since that is where per-view options such as `group_by` and `media_field` live.
 | `generation` | object | none | Configuration for async job generation. Only relevant if stage has `regenerate` or `bulk_regenerate` actions. |
 | `form_schema` | object | none | JSON Schema defining a form for artifact type `"form"`. Only used if `artifact_type` is `"form"`. |
 
