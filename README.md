@@ -1,102 +1,86 @@
 # Agent Surface Board
 
-A portable skill/runtime that gives a coding agent a persistent, versioned, browser-based
-review board — without hand-building a frontend for every workflow. The full design
-rationale and normative spec lives in [`docs/SPEC.md`](docs/SPEC.md); the behavioral spec
-an agent actually loads to use this is [`SKILL.md`](SKILL.md).
+**A browser review board your coding agent works on, so you aren't stuck in a chat window.**
+You open a tab and see the work: a draft, a set of images, a task list, a data migration.
+You approve, revise, or comment, and the agent picks up your feedback in the background.
+Everything lives in a local SQLite file, so closing the tab, rebooting, or crashing the
+agent loses nothing.
 
-**Model:** `Board UI → SQLite store/inbox → Supervisor → Worker`, with a separate async
-job path for slow generation (images, video, etc). The store is the source of truth; the
-worker is a replaceable, disposable process; the board is a thin renderer over the store.
+It's for **developers who drive coding agents** (Codex, opencode, agy) and want a reviewable,
+versioned place for the agent's output. You don't have to build a custom frontend for each
+workflow: you describe the workflow in a small JSON "stage config" and the board renders it.
 
-## Current status
+![Migration surface: source rows, field-by-field comparison, and live target dataset](docs/images/surface_migration.webp)
 
-Phases 0–5 are built and merged into `main`: a working runtime with a real (optional)
-coding-agent in the loop:
+*A data-migration console built on Agent Surface. Every "Migrate" click writes a new
+immutable version, so the history doubles as an audit trail.*
 
-- **SQLite-backed store** with immutable versions, provenance tracking, and DAG-aware
-  staleness propagation (selecting a new upstream version marks descendants stale without
-  destroying them; locked descendants are flagged, not auto-regenerated).
-- **Async job + event system**: slow generation runs as a job the poller tracks; events are
-  at-least-once and idempotent, so crash/redelivery never duplicates effects.
-- **Crash recovery**: `surface recover` reclaims leases and resumes in-flight work after a
-  worker or supervisor crash, with `--force-reclaim` for stuck leases.
-- **Web board UI** (`surface/board_web.py`, FastAPI + hand-written HTML/CSS/JS) with several
-  view types — flat list, status columns, and a new **grid** view for image/video tiles with
-  a per-tile version switcher — plus Mermaid diagram rendering, server-side version diffs,
-  and a live dependency-graph view.
-- **Real coding-agent backends**: `opencode`, `codex`, and `agy` can sit behind the board's
-  `revise` action over the real production dispatch path (not a demo shim), selected with
-  `surface serve --agent <name>`.
+## Try it in 60 seconds
 
-Per-phase build notes (what was delivered, what was found by review, what's still rough) are
-tracked under `ongoing/phase-1-2-harden-generalize/STATE.md`, `ongoing/phase-3-board-web-redesign/STATE.md`,
-and `ongoing/phase-4-visual-planning-extensions/STATE.md`.
-
----
-
-## For everyday users
-
-Think of this as a **persistent project board that an AI agent works on in the background**,
-instead of a chat window. You open a browser tab, see the current state of the work (a draft,
-an image, a task list — whatever the project is), and you approve, revise, or comment. The
-agent picks up your feedback asynchronously and updates the board. Nothing is lost if you close
-the tab, restart your machine, or the agent process crashes — the board survives all of it,
-because every piece of state lives in a SQLite file, not in a chat transcript you'd have to
-re-explain next time.
-
-The simplest possible example — a one-artifact "poem" project with no real agent attached
-(the board still works without one; it just won't auto-revise your feedback):
+Requires Python 3.10+.
 
 ```bash
-pip install -e .
-pip install -e ".[board]"     # FastAPI + uvicorn, needed for the board UI
-
-surface --db .surface-board/state.sqlite3 init --stage poem
-surface --db .surface-board/state.sqlite3 serve
+pip install -e ".[board]"          # the `surface` command + the web board (FastAPI, uvicorn)
+surface init --stage poem          # creates .surface-board/state.sqlite3
+surface serve                      # prints http://127.0.0.1:<port>/?token=... and runs until Ctrl-C
 ```
 
-`serve` prints a `http://127.0.0.1:<port>` URL with a one-time auth token baked into it.
-Open that URL and you'll see a single card with the poem's current text, its status, and
-buttons for the actions that stage allows (e.g. approve, revise). Edit it, approve it, or
-leave it — the state is saved immediately in the SQLite file, and reopening the same `--db`
-path later shows you exactly where you left off.
+Open the printed URL. You'll see one card holding the poem's current text, its status, and the
+actions the stage allows (approve, revise). Edit or approve it, close the tab, and run
+`surface serve` again later: you're back where you left off.
 
-To actually have an agent write and revise content for you (rather than just hosting a blank
-board), add `--agent <name>` when you `serve` — see "Real agent backends" below.
+That board has no agent attached, so feedback is stored but nothing rewrites it. To put a real
+agent behind **revise**:
 
-### Example surfaces
+```bash
+surface serve --agent codex        # or: opencode, agy
+```
 
-The architecture below is one skeleton — board + store + supervisor + worker — with the
-*worker* and *stage config* swapped out per app. Two concrete examples built on it:
+**Next steps:**
+- **Evaluating?** Look at the [example surfaces](#what-you-can-build) below, then try a richer
+  preset: `surface --db demo.sqlite3 init --stage task_board`, then `surface --db demo.sqlite3 serve`.
+- **Building on it?** Read [Planning a New Surface in `SKILL.md`](SKILL.md), then the
+  [stage config guide](docs/stage-config-guide.md).
+- **Want the agent to drive it?** [`SKILL.md`](SKILL.md) is the behavioral spec an agent loads.
 
-- **Haiku board** (a minimal example) — a one-box app: type a topic, click Generate, and the
-  worker calls an LLM to write a fresh haiku, shown on a yellow sticky note. Each generate is
-  an immutable version, so you can look back at every haiku ever written in that session — the
-  "undo history" is free, it's just the version table.
+## Contents
 
-  ![Haiku board](docs/images/surface_poem.webp)
+- [What you can build](#what-you-can-build)
+- [How it works](#how-it-works)
+- [Bundled stage presets](#bundled-stage-presets)
+- [Board features](#board-features)
+- [Real agent backends](#real-agent-backends)
+- [Writing a new stage config](#writing-a-new-stage-config)
+- [CLI reference](#cli-reference)
+- [Resuming a project (in progress)](#resuming-a-project-in-progress)
+- [Development and tests](#development-and-tests)
+- [Status and limitations](#status-and-limitations)
 
-- **Migration surface** (a real-world example) — a data-migration console for moving rows from
-  one dataset to another. The left column lists source rows (matched/unmatched), the middle
-  panel compares a matched pair field-by-field with price deltas and an editable "final" column,
-  and the right column shows the live target dataset plus a running report (rows, matched,
-  migrated, unmatched counts). Clicking "Migrate" writes a new version of the target dataset, so
-  the version history doubles as a full audit trail of every migration decision.
+## What you can build
 
-  ![Migration surface](docs/images/surface_migration.webp)
+Every surface uses the same skeleton: board, store, supervisor, worker. Only the **worker**
+and the **stage config** change from one app to the next. Two examples:
 
-Both are the same pattern: the board is a thin, deterministic renderer over the SQLite store
-(it never holds state itself — clicks become inbox events, polling shows fresh state); a
-Supervisor claims events and dispatches them to a worker; the worker is the only part that's
-actually different between the two apps (haiku-writing vs. row-matching), and plugs in via the
-same stage-config + worker contract described in "Writing a new stage config" below.
+### Haiku board (minimal)
 
----
+A one-box app. Type a topic, click Generate, and the worker writes a fresh haiku onto a
+yellow sticky note. Each generation is an immutable version, so you get the full history of
+every haiku for free. Undo is just the version table.
 
-## For programmers
+![Haiku board](docs/images/surface_poem.webp)
 
-### Architecture at a glance
+### Migration console (real-world)
+
+Moves rows from one dataset to another (screenshot at the top of this page). The left column
+lists source rows, matched and unmatched. The middle panel compares a matched pair field by
+field, with price deltas and an editable "final" column. The right column shows the live target
+dataset and a running report of matched, migrated, and unmatched counts. Each "Migrate" writes a
+new version of the target, so every migration decision can be audited.
+
+The two apps differ only in their worker (writing haiku vs. matching rows). Both plug in
+through the same stage-config and worker contract.
+
+## How it works
 
 ```
 Board UI (web) ──read/write──▶ SQLite Store ◀──jobs/results── Job Poller ──▶ Providers
@@ -110,163 +94,97 @@ Board UI (web) ──read/write──▶ SQLite Store ◀──jobs/results─�
                             Worker (python -m surface.worker, or a real agent backend)
 ```
 
-- **Store is truth.** All project state lives in SQLite; worker context is disposable.
-- **Versions are immutable.** Revisions create new versions; nothing is deleted.
-- **Dependencies are a DAG.** Selecting a new upstream version marks descendants stale
-  (never destroys them); locked descendants are flagged but not auto-regenerated.
-- **Generation is always async.** Slow work becomes a job; the worker never blocks a turn
-  waiting on it.
-- **Events are at-least-once, idempotent.** Redelivery after a crash does not duplicate
-  effects (versions/jobs are deduplicated by the originating event id).
-- **Renderer is replaceable.** `board.py` builds a renderer-independent display model;
-  `board_web.py` is the shipped renderer, but it's not the only possible one (see the
+The board is a thin renderer and holds no state. Clicks become inbox events, and polling
+shows fresh state. The Supervisor claims events and dispatches them to a worker. Slow
+generation (images, video) runs as async jobs that the Poller tracks.
+
+- **The store is the source of truth.** All project state lives in SQLite. Worker context is
+  disposable.
+- **Versions are immutable.** A revision creates a new version. Nothing is deleted.
+- **Dependencies form a DAG.** Selecting a new upstream version marks descendants stale without
+  destroying them. Locked descendants are flagged but not regenerated automatically.
+- **Generation is always async.** Slow work becomes a job, and the worker never blocks a turn
+  waiting for it.
+- **Events are at-least-once and idempotent.** Versions and jobs are deduplicated by the
+  originating event id, so redelivery after a crash doesn't duplicate effects.
+- **Crash recovery.** `surface recover` reclaims leases and resumes in-flight work.
+  `--force-reclaim` handles stuck leases.
+- **The renderer is replaceable.** `board.py` builds a display model that doesn't depend on a
+  renderer. `board_web.py` is the renderer that ships, but you can write others (see the
   `04-live-surface` pattern referenced from `SKILL.md`).
 
-See [`docs/SPEC.md`](docs/SPEC.md) for the full normative specification.
+The store (`surface/store.py`, `surface/schema.py`) holds artifacts, versions, dependencies,
+the event inbox with lease-based claiming, async jobs, budgets, and locks. You can drive all
+of it from the CLI without opening the board, using `surface store ...` and `surface inbox ...`.
+The full normative spec is [`docs/SPEC.md`](docs/SPEC.md).
 
-### Store, events, and jobs
+## Bundled stage presets
 
-The store (`surface/store.py`, `surface/schema.py`) owns artifacts, immutable versions, DAG
-dependencies with stale propagation, an at-least-once event inbox with lease-based claiming,
-async jobs, budgets, and locks. The `Supervisor` claims events from the inbox and dispatches
-them to a worker over a `WorkerTransport` (native subprocess, with a resume fallback); the
-`Poller` independently drives async jobs (image/video generation, etc.) against pluggable
-providers. You can drive all of this directly from the CLI without ever opening the board —
-`surface store ...` and `surface inbox ...` below operate straight on the store.
+All presets are in `surface/stages/`. Use them with `surface init --stage <name>`.
 
-### Writing a new stage config
+| Preset | What it is |
+| --- | --- |
+| `poem` | Minimal single-artifact example (the quickstart above) |
+| `task_board` | Status-column board for agent-decomposed multi-step work |
+| `movie` | Linear media pipeline: script → shots → keyframes → clips → assembly |
+| `image_grid_example` | Demonstrates the `grid` view for image and video tiles |
+| `project_kickoff`, `questionnaire`, `plan_review`, `document_review`, `diff_review`, `generic_media_pipeline` | Templates for common review and intake workflows |
 
-Don't guess at the schema — the two canonical references are:
+## Board features
 
-1. [`docs/stage-config-guide.md`](docs/stage-config-guide.md) — the schema reference, including
-   the `board_view` field, which is now an **object** with a `type` key
-   (`{"type": "list"}`, `{"type": "columns"}`, or `{"type": "grid", "group_by": ..., "media_field": ...,
-   "title_field": ..., "badge_fields": [...]}`). A bare string like `"board_view": "columns"` is
-   still accepted and normalized automatically for backward compatibility.
-2. The **"Planning a New Surface"** section near the top of [`SKILL.md`](SKILL.md) — a
-   methodology to work through *before* writing JSON: what's the unit of work, what depends on
-   what, is this a pipeline or a conversation, what does the user need to see to decide, what
-   collection view fits, and which actions actually need a worker. Read this before picking a
-   `board_view` — the view type is a consequence of those answers, not an independent choice.
+The web renderer (`surface/board_web.py`, FastAPI plus hand-written HTML/CSS/JS) provides:
 
-Custom stage configs are plain JSON validated against `surface/stages/config.py`.
+- **Three collection views**, selected with `board_view`: `list` (flat, the default), `columns`
+  (grouped by status), and `grid` (image and video tiles, each with its own version switcher).
+- **Mermaid diagrams.** Fenced ` ```mermaid ` blocks in text or markdown artifacts render as
+  diagrams.
+- **Version diff.** Text artifacts with two or more versions get a "Compare to previous version"
+  control. The server computes a line-by-line diff on each load. This isn't available for
+  form, image, video, or audio content.
+- **Dependency graph.** The "Dependencies" button on a card shows its upstream and downstream
+  neighbors as a status-colored Mermaid graph. The graph updates live.
 
-### Real agent backends
+## Real agent backends
 
 `surface serve --agent <name> [--agent-model <id>] [--agent-timeout <seconds>]` puts a real
-coding-agent CLI behind the board's `revise` action, through the real production dispatch
-path (`Supervisor` → `NativeStreamTransport` → `surface worker` subprocess), not a bypass
-script. Registered backends, from `surface/agents/registry.py`:
+coding-agent CLI behind the board's `revise` action. It goes through the production dispatch
+path (`Supervisor` → `NativeStreamTransport` → `surface worker` subprocess), not a demo shim.
+The backends registered in `surface/agents/registry.py` are:
 
 - `opencode` (`surface/agents/opencode_backend.py`)
 - `codex` (`surface/agents/codex_backend.py`)
 - `agy` (`surface/agents/agy_backend.py`)
-- `fake` (`surface/agents/fake_backend.py`) — deterministic, no network call; used by the test
-  suite and for exercising the dispatch path without a live CLI.
+- `fake` (`surface/agents/fake_backend.py`) is deterministic and makes no network calls. The
+  test suite uses it, and you can use it to exercise the dispatch path without a live CLI.
 
-See [`docs/agent-backends.md`](docs/agent-backends.md) for exact non-interactive invocation
-templates and model ID formats per backend. To wire up a new backend, implement the
-`AgentBackend` interface in `surface/agents/base.py` and register it in
+Model ID formats differ per backend. For example, opencode uses `opencode-go/<model-id>`. See
+[`docs/agent-backends.md`](docs/agent-backends.md) for the exact invocation templates. To add a
+backend, implement `AgentBackend` in `surface/agents/base.py` and register it in
 `surface/agents/registry.py`.
 
-### Tests
+## Writing a new stage config
 
-```bash
-PYTHONPATH=. pytest -q
-```
+Stage configs are plain JSON validated against `surface/stages/config.py`. Don't guess the
+schema. Start from these two references:
 
-Tests live under `tests/`. The suite runs the full stack (board/CLI → event → supervisor →
-worker subprocess → store) through the production dispatch path using the `fake` backend, so
-crash/timeout/recovery behavior is verified without needing a live agent CLI or network
-access.
-
-### Project layout
-
-```
-surface/
-  store.py, schema.py       # SQLite store — source of truth
-  supervisor.py              # event claim/dispatch loop
-  transports/                # WorkerTransport implementations
-  worker.py                  # reference deterministic worker
-  poller.py, providers/      # async job polling + mock generation providers
-  board.py                   # display model + action handler (renderer-independent)
-  board_web.py, static/      # default board renderer (FastAPI + hand-written HTML/CSS/JS)
-  agents/                    # real agent backends (opencode, codex, agy, fake) + registry
-  stages/                    # stage config loader + bundled presets
-  cli.py                     # surface CLI entrypoint
-tests/
-docs/SPEC.md                 # normative specification
-docs/stage-config-guide.md   # stage config schema reference
-docs/agent-backends.md       # per-backend CLI invocation details
-SKILL.md                     # the behavioral spec / "how to use this" doc an agent loads
-ongoing/                     # phase build logs (STATE.md per phase)
-```
-
----
-
-## Quickstart (CLI-only, verified against `surface/cli.py`)
-
-Requires Python 3.10+.
-
-```bash
-pip install -e .              # installs the `surface` command
-pip install -e ".[board]"     # FastAPI + uvicorn, for the web board
-
-# --db is a global flag; it comes BEFORE the subcommand.
-# Initialize a new project using the built-in "poem" stage preset
-surface --db .surface-board/state.sqlite3 init --stage poem
-
-# Inspect the store directly
-surface --db .surface-board/state.sqlite3 store list
-
-# Run the full runtime: store + supervisor + poller + board
-surface --db .surface-board/state.sqlite3 serve
-
-# Run with a real agent backend behind the board's "revise" action
-surface --db .surface-board/state.sqlite3 serve --agent codex --agent-model claude-sonnet-4
-
-# Or run headless (no board), bounded for scripting/testing:
-surface --db .surface-board/state.sqlite3 serve --no-board --max-iterations 5
-```
-
-`serve` runs until Ctrl-C by default (`--run-once` or `--max-iterations N` to bound it). It
-binds the board to `127.0.0.1` (`--host`/`--port` to change) with a random per-run auth token
-written under the runtime dir (`--runtime-dir` to change it), never a fixed/guessable
-credential. The board dependency (fastapi/uvicorn) is optional at import time — `serve` logs
-and runs headless if it's missing.
-
-## Resuming and launching a project
-
-Once a project has been initialized, you don't need to remember which stage, agent, or model you used. `surface init` and `surface serve` record those choices in the project's own database as a *launch profile*, and every explicit flag you pass to `serve` later updates it (last used wins).
-
-### `surface resume`
-
-    surface resume                 # current directory
-    surface resume ~/work/my-board # any project directory
-    surface resume --no-browser    # print the URL only
-    surface resume --with-agent    # also open your agent CLI in a new Terminal window (macOS)
-
-If the board is already running, `resume` just prints its URL and opens it in your browser. Otherwise it starts the board with the saved settings. Before starting, it checks that the configured agent CLI (for example `claude` or `codex`) is on your `PATH`, and it tells you how to fix things if not.
-
-### Double-click launcher (macOS)
-
-    surface app create            # writes "Open Surface Board.command" in the project
-    surface app create --force    # overwrite an existing one
-
-Double-click `Open Surface Board.command` in Finder to resume the project. The file works if you move the project folder. It finds `surface` through `$SURFACE_BIN`, then your login shell's `PATH`, then the path recorded when the file was created. If something fails, the Terminal window stays open so you can read the error. The first time you open it, macOS may ask you to confirm (right-click, then Open). The recorded fallback path is specific to this machine, so recreate the launcher on other machines rather than sharing it.
-
-### What "resume" does and doesn't restore
-
-`surface resume` restores everything that agent_surface owns: your artifacts, versions, board items, events, and settings, all stored in `.surface-board/`. It does **not** restore your coding agent's own conversation. That history lives inside the agent CLI (Claude Code, Codex, and so on) and agent_surface can't create, read, or repair it. `--with-agent` asks the CLI to continue its most recent session (for example `claude --continue`). If that session is gone, you get a fresh conversation. To help either way, `resume` prints a short summary of the project's current stage, open items, and recent events, which you can paste into a new session.
+1. **"Planning a New Surface"** near the top of [`SKILL.md`](SKILL.md). Work through it *before*
+   you write JSON. It covers the unit of work, what depends on what, whether this is a pipeline
+   or a conversation, what the user needs to see to decide, and which actions need a worker.
+   The view type follows from those answers.
+2. [`docs/stage-config-guide.md`](docs/stage-config-guide.md) is the schema reference. It
+   includes `board_view`, which is an object with a `type` key: `{"type": "list"}`,
+   `{"type": "columns"}`, or `{"type": "grid", "group_by": ..., "media_field": ...,
+   "title_field": ..., "badge_fields": [...]}`. A bare string such as `"columns"` is still
+   accepted and normalized automatically.
 
 ## CLI reference
 
-`--db PATH` is a **global** flag — it must come before the subcommand (default:
-`.surface-board/state.sqlite3`).
+`--db PATH` is a **global** flag, so it goes *before* the subcommand. It defaults to
+`.surface-board/state.sqlite3`. JSON results go to stdout and diagnostics go to stderr.
 
 ```
 surface [--db PATH] init --stage <preset>
-surface [--db PATH] status                                # summarize project state
+surface [--db PATH] status                                 # summarize project state
 surface [--db PATH] tui                                    # stdlib terminal board
 surface [--db PATH] serve [--run-once] [--max-iterations N] [--no-board]
                           [--renderer {web,gradio}] [--host HOST] [--port PORT]
@@ -300,66 +218,96 @@ surface [--db PATH] inbox fail <event_id>
 surface [--db PATH] project summary
 ```
 
-JSON results go to stdout; diagnostics go to stderr.
+By default `serve` runs until Ctrl-C. Use `--run-once` or `--max-iterations N` to bound it, for
+example `surface serve --no-board --max-iterations 5` for headless scripting. The board binds to
+`127.0.0.1` (change it with `--host`/`--port`). Each run gets a random auth token, written under
+the runtime dir (`--runtime-dir`), so there's never a fixed or guessable credential. If
+fastapi/uvicorn aren't installed, `serve` logs that and runs headless.
 
-## Stage presets
+## Resuming a project (in progress)
 
-Bundled presets, all in `surface/stages/`:
+> **Not yet available from the CLI.** The commands in this section are designed and the
+> backing `surface/launch_profile.py` module has landed, but `resume` and `app` aren't wired
+> into `surface/cli.py` yet. Until they are, reopen a project with `surface --db <path> serve`.
 
-- **`poem`** — the minimal single-artifact example used in the everyday-user quickstart above.
-- **`movie`** — a linear pipeline (script → shots → keyframes → clips → assembly) for
-  video/media production, with per-stage allowed actions, dependencies, and generation
-  defaults.
-- **`task_board`** — a status-column board for agent-decomposed multi-step work, typically
-  used with `board_view: {"type": "columns"}`.
-- **`image_grid_example`** — demonstrates the `grid` board view (`{"type": "grid", ...}`) for
-  image/video tiles with a per-tile version switcher.
-- **`project_kickoff`**, **`questionnaire`**, **`plan_review`**, **`document_review`**,
-  **`diff_review`**, **`generic_media_pipeline`** — templates for common review/intake
-  workflows.
+The plan is for `surface init` and `surface serve` to record your stage, agent, and model as a
+*launch profile* in the project database. Explicit flags passed to later `serve` runs update
+it, and the last value used wins.
 
-Custom stage configs are plain JSON validated against `surface/stages/config.py`; see
-[`docs/stage-config-guide.md`](docs/stage-config-guide.md) for the full schema.
+    surface resume                 # current directory
+    surface resume ~/work/my-board # any project directory
+    surface resume --no-browser    # print the URL only
+    surface resume --with-agent    # also open your agent CLI in a new Terminal window (macOS)
 
-## Web board rendering features
+If the board is already running, `resume` prints its URL and opens it. Otherwise it starts the
+board with the saved settings, after checking that the configured agent CLI is on your `PATH`.
 
-The web renderer (`surface/board_web.py`) includes:
+    surface app create            # writes "Open Surface Board.command" in the project (macOS)
+    surface app create --force    # overwrite an existing one
 
-- **Multiple collection views**, via the `board_view` config field: `list` (flat, default),
-  `columns` (grouped by status), and `grid` (image/video tiles with a per-tile version
-  switcher).
-- **Mermaid diagram support**: any text/markdown artifact with fenced `` ```mermaid ``` ``
-  blocks renders them as diagrams automatically.
-- **Version diff**: text artifacts with 2+ versions show a "Compare to previous version"
-  control, with server-side line-by-line diffs computed fresh on each load. Not shown for
-  form/image/video/audio content.
-- **Dependency graph view**: a "Dependencies" button on any card shows its upstream/downstream
-  neighbors as a status-colored Mermaid graph, updating live without restart.
+Double-clicking the `.command` file resumes the project. It locates `surface` through
+`$SURFACE_BIN`, then your login shell's `PATH`, then the path recorded when the file was
+created. On failure, the Terminal window stays open so you can read the error. macOS may ask
+you to confirm the first launch (right-click, then Open). The recorded path is specific to one
+machine, so recreate the launcher on each machine instead of sharing it.
 
-## Real agent backends
+**What resume restores:** everything agent_surface owns, meaning artifacts, versions, board
+items, events, and settings in `.surface-board/`. It does **not** restore your coding agent's
+own conversation, because that history lives inside the agent CLI. `--with-agent` asks the CLI
+to continue its most recent session. If that session is gone, you get a fresh one. Either way,
+`resume` prints a short summary of the current stage, open items, and recent events that you
+can paste into a new session.
 
-`surface serve --agent <name> [--agent-model <id>] [--agent-timeout <seconds>]` puts a real
-coding-agent CLI (`opencode`, `codex`, or `agy`) behind the board's `revise` action, through
-the real production dispatch path: `Supervisor` → `NativeStreamTransport` → `surface worker`
-subprocess, no bypass scripts. See [`docs/agent-backends.md`](docs/agent-backends.md) for
-exact non-interactive invocation templates and model ID formats per backend.
+## Development and tests
 
-A `fake` backend (deterministic, no network call) exists for all unit/integration tests —
-run `PYTHONPATH=. pytest -q` to exercise the full stack through the production dispatch path
-with it, proving timeouts, crashes, and recovery all work without a real agent CLI or network.
+```bash
+pip install -e ".[board]"
+PYTHONPATH=. pytest -q
+```
 
-## Current limitations / known gaps
+The suite runs the full stack (board/CLI → event → supervisor → worker subprocess → store)
+through the production dispatch path using the `fake` backend. That verifies crash, timeout,
+and recovery behavior without a live agent CLI or network access.
 
-- **CLI-only.** There's no desktop launcher or packaged installer for Windows/Linux (or
-  macOS) — you run `pip install -e .` and use the `surface` command directly.
-- **Grid view options aren't read yet.** `board_view: {"type": "grid", ...}`'s `group_by`,
-  `media_field`, `title_field`, and `badge_fields` options pass config validation but are not
-  yet consumed by the renderer (tiles render with defaults regardless).
-- **Some view types are deliberately not built**: gantt, calendar, saved filters, and a
-  report builder are explicitly out of scope for now — `list`, `columns`, and `grid` are the
-  full set.
-- **One live-CLI test for the `agy` backend has a known, environment-specific failure** (a
-  stale hardcoded model name), unrelated to product code.
-- `--renderer gradio` is a legacy path (needs the separate `pip install -e ".[gradio]"` extra
-  and gradio `>=4.0,<6` specifically). `web` (the default) is the actively developed renderer
-  and the one described above; prefer it unless you have a specific reason not to.
+```
+surface/
+  store.py, schema.py       # SQLite store, the source of truth
+  supervisor.py              # event claim/dispatch loop
+  transports/                # WorkerTransport implementations
+  worker.py                  # reference deterministic worker
+  poller.py, providers/      # async job polling + mock generation providers
+  board.py                   # display model + action handler (renderer-independent)
+  board_web.py, static/      # default board renderer
+  agents/                    # agent backends (opencode, codex, agy, fake) + registry
+  launch_profile.py          # saved per-project launch settings (resume, in progress)
+  stages/                    # stage config loader + bundled presets
+  cli.py                     # surface CLI entrypoint
+tests/
+docs/SPEC.md                 # normative specification
+docs/stage-config-guide.md   # stage config schema reference
+docs/agent-backends.md       # per-backend CLI invocation details
+SKILL.md                     # the behavioral spec an agent loads
+ongoing/                     # per-phase build logs (STATE.md per phase)
+```
+
+## Status and limitations
+
+Phases 0 through 5 are built and merged into `main`: the store, async jobs and events, crash
+recovery, the web board with list, columns, and grid views, and real agent backends. Per-phase
+notes on what shipped, what review found, and what's still rough are in
+`ongoing/phase-1-2-harden-generalize/STATE.md`, `ongoing/phase-3-board-web-redesign/STATE.md`,
+and `ongoing/phase-4-visual-planning-extensions/STATE.md`.
+
+What isn't there yet:
+
+- **Install from source only.** There's no PyPI package or packaged installer yet. You install
+  with `pip install -e .` from a clone.
+- **Grid view options are accepted but ignored.** `group_by`, `media_field`, `title_field`, and
+  `badge_fields` pass validation, but the renderer doesn't read them yet, so tiles use default
+  rendering.
+- **Out of scope for now:** gantt and calendar views, saved filters, and a report builder.
+  `list`, `columns`, and `grid` are the complete set of views.
+- **One live-CLI test for `agy` fails in some environments** because of a stale hardcoded model
+  name in the test. Product code isn't affected.
+- **`--renderer gradio` is legacy.** It needs `pip install -e ".[gradio]"` with gradio
+  `>=4.0,<6`. The default `web` renderer is the one under active development.
