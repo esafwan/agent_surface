@@ -16,8 +16,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import time
 import webbrowser
@@ -26,9 +28,18 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
-from surface.agents.registry import BACKENDS, is_available
+from surface.agents.registry import BACKENDS, is_available, resolve_binary
 from surface.launch_profile import DEFAULTS, load_profile
 from surface.store import Store
+
+# Backends with a known interactive/resume CLI mode. Backends not listed
+# here (e.g. "agy", "fake") have no known interactive mode -- that's the
+# "unknown" case handled by `open_agent_terminal`, not an error.
+INTERACTIVE: dict[str, dict] = {
+    "claude": {"cmd": "claude", "resume_flag": ["--continue"]},
+    "codex": {"cmd": "codex", "resume_flag": ["resume", "--last"]},
+    "opencode": {"cmd": "opencode", "resume_flag": ["--continue"]},
+}
 
 RESUME_LOCK_TIMEOUT = 3.0
 RESUME_LOCK_POLL = 0.1
@@ -52,15 +63,18 @@ def detect_live_runtime(project_dir: Path) -> Optional[str]:
       * the port actually accepts a TCP connection -- pid-liveness alone
         is not trusted, since a recycled pid can give a false positive.
 
-    The URL embeds the runtime token as HTTP basic-auth credentials
-    (`http://surface:<token>@host:port/`), matching how `serve()` actually
-    protects the board (see `board_web.check_basic_auth`) -- the board has
-    no `?token=` query-param auth path.
+    The URL is the plain board origin (`http://127.0.0.1:<port>/`), with no
+    embedded credentials -- `serve()` protects the board with HTTP basic
+    auth (see `board_web.check_basic_auth`) but never prints a URL with the
+    token embedded in it, and embedding a secret in a URL that gets passed
+    to `webbrowser.open()` (or logged) risks leaking it via browser history
+    or process argv. The caller is responsible for telling the user how to
+    authenticate (see `resume()`); the browser's own basic-auth prompt
+    handles the rest interactively.
     """
     run_dir = _run_dir_for(Path(project_dir))
     port_file = run_dir / "port"
     pid_file = run_dir / "board.pid"
-    token_file = run_dir / "token"
 
     if not port_file.exists() or not pid_file.exists():
         return None
@@ -86,13 +100,6 @@ def detect_live_runtime(project_dir: Path) -> Optional[str]:
     except OSError:
         return None
 
-    try:
-        token = token_file.read_text().strip() if token_file.exists() else ""
-    except OSError:
-        token = ""
-
-    if token:
-        return f"http://surface:{token}@127.0.0.1:{port}/"
     return f"http://127.0.0.1:{port}/"
 
 
@@ -178,6 +185,121 @@ def _fallback_profile_from_stage_config(store: Store) -> Optional[dict]:
     return profile
 
 
+def context_hint(conn, n: int = 10) -> str:
+    """Build a short human-readable summary of the project's current state.
+
+    Pulled from the store (stage, open/unapproved board items, and the last
+    `n` events) so a human picking up an interactive agent session gets
+    oriented without having to open the board. This describes
+    agent_surface's own persisted state, not any prior LLM conversation.
+    """
+    store = Store(conn)
+
+    stage = None
+    cursor = conn.cursor()
+    cursor.execute("SELECT value_json FROM kv_state WHERE key = ?", ("stage_config",))
+    row = cursor.fetchone()
+    if row:
+        try:
+            stage = json.loads(row[0]).get("id")
+        except (TypeError, ValueError, AttributeError):
+            stage = None
+    if stage is None:
+        profile = load_profile(conn)
+        if profile:
+            stage = profile.get("stage")
+
+    artifacts = store.list_artifacts()
+    open_items = [a for a in artifacts if a.get("status") not in ("approved", "done")]
+
+    events = store.list_active_events()
+    recent = events[-n:] if events else []
+
+    lines = [
+        "Project context (agent_surface's own state — not your prior conversation):",
+        f"  stage: {stage or 'unknown'}",
+        f"  open items: {len(open_items)}",
+    ]
+    if recent:
+        descriptions = []
+        for ev in recent:
+            kind = ev.get("type") or ev.get("event_type") or "event"
+            created_at = ev.get("created_at") or "unknown time"
+            descriptions.append(f"{kind} ({created_at})")
+        lines.append(f"  recent events: {', '.join(descriptions)}")
+    else:
+        lines.append("  recent events: none")
+
+    return "\n".join(lines)
+
+
+def open_agent_terminal(project_dir: Path, backend_name: str) -> bool:
+    """Open a new Terminal window resuming `backend_name`'s interactive CLI.
+
+    Returns True if a terminal was successfully launched, False if the
+    backend has no known interactive mode, isn't on PATH, or this isn't
+    macOS -- callers should treat False as "print a friendly fallback
+    message", not as an error.
+    """
+    if backend_name not in INTERACTIVE:
+        return False
+
+    try:
+        binary = resolve_binary(backend_name)
+    except KeyError:
+        return False
+    if not binary:
+        return False
+
+    if sys.platform != "darwin":
+        return False
+
+    spec = INTERACTIVE[backend_name]
+    parts = [str(project_dir)]
+    cmd = (
+        f"cd {shlex.quote(str(project_dir))} && "
+        f"{shlex.quote(binary)} "
+        f"{' '.join(shlex.quote(f) for f in spec['resume_flag'])}"
+    )
+    escaped_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
+
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", f'tell application "Terminal" to do script "{escaped_cmd}"'],
+            capture_output=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _agent_handoff(project_dir: Path, profile: Optional[dict], with_agent: bool,
+                    conn=None) -> None:
+    """Print context + open an interactive terminal when requested.
+
+    Triggers when `with_agent` is True OR the profile's `interactive` flag
+    is set -- either is sufficient. Never raises and never blocks board
+    startup: a missing/unknown backend just prints a friendlier message.
+    """
+    if profile is None:
+        return
+    if not (with_agent or profile.get("interactive")):
+        return
+
+    agent_name = profile.get("agent")
+    if agent_name is None:
+        print("--with-agent: no agent configured for this project; skipping interactive handoff")
+        return
+
+    if profile.get("resume_context", True) and conn is not None:
+        print(context_hint(conn))
+
+    if open_agent_terminal(project_dir, agent_name):
+        print(f"opened an interactive '{agent_name}' terminal session")
+    else:
+        print(f"no interactive mode known for backend '{agent_name}'; see docs")
+
+
 def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False,
            db_override: Optional[str] = None) -> int:
     """Reattach to a live board, or start one from the saved launch profile.
@@ -203,8 +325,21 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
 
         if url is not None:
             print(url)
+            print("(sign in with user 'surface', password: see "
+                  f"{run_dir / 'token'}, or it will prompt you)")
             if not no_browser:
                 webbrowser.open(url)
+
+            if db_path.exists():
+                reattach_store = Store(str(db_path))
+                try:
+                    reattach_profile = load_profile(reattach_store.conn)
+                    if reattach_profile is None:
+                        reattach_profile = _fallback_profile_from_stage_config(reattach_store)
+                    _agent_handoff(project_dir, reattach_profile, with_agent,
+                                    conn=reattach_store.conn)
+                finally:
+                    reattach_store.conn.close()
             return 0
 
         if not acquired:
@@ -251,8 +386,7 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
                     )
                     return 2
 
-            if with_agent:
-                print("--with-agent: interactive agent handoff not yet implemented")
+            _agent_handoff(project_dir, profile, with_agent, conn=store.conn)
         finally:
             store.conn.close()
 

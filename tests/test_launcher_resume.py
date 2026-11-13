@@ -32,7 +32,7 @@ class TestDetectLiveRuntime:
             monkeypatch.setattr(os, "kill", lambda pid, sig: None)
 
             url = detect_live_runtime(tmp_path)
-            assert url == f"http://surface:tok123@127.0.0.1:{port}/"
+            assert url == f"http://127.0.0.1:{port}/"
         finally:
             sock.close()
 
@@ -140,7 +140,7 @@ class TestResume:
 
             code = resume(tmp_path)
             assert code == 0
-            assert opened["url"] == f"http://surface:tok123@127.0.0.1:{port}/"
+            assert opened["url"] == f"http://127.0.0.1:{port}/"
         finally:
             sock.close()
 
