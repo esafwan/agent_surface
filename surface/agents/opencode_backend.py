@@ -10,6 +10,7 @@ class OpencodeBackend:
     """Adapter for the opencode CLI agent backend."""
 
     name = "opencode"
+    binary = "opencode"
     supports_resume = False
 
     def build_argv(

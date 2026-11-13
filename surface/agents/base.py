@@ -6,11 +6,17 @@ An AgentBackend knows how to build an argv for a specific agent CLI (e.g. a
 raw stdout/stderr/returncode into a normalized AgentReply.
 """
 
+import shutil
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
 # Allowed AgentError kinds.
 _VALID_KINDS = {"auth", "rate_limit", "timeout", "bad_output", "crash"}
+
+
+def which_binary(binary: str) -> str | None:
+    """Return the absolute path of `binary` on PATH, or None if not found."""
+    return shutil.which(binary)
 
 
 @dataclass
@@ -43,6 +49,7 @@ class AgentBackend(Protocol):
     """Protocol implemented by each agent CLI adapter."""
 
     name: str
+    binary: str  # executable name on PATH; "" means no external binary required
     supports_resume: bool
 
     def build_argv(

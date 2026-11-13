@@ -18,6 +18,7 @@ class CodexBackend:
     """
 
     name = "codex"
+    binary = "codex"
     supports_resume = False
 
     def build_argv(

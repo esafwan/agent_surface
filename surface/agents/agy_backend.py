@@ -10,6 +10,7 @@ class AntigravityBackend:
     """Adapter for the agy (Antigravity) CLI agent backend."""
 
     name = "agy"
+    binary = "agy"
     supports_resume = False
 
     def build_argv(

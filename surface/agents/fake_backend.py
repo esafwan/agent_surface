@@ -15,6 +15,7 @@ class FakeBackend:
     """Test-only backend that shells out to tests/fixtures/fake_agent.py."""
 
     name = "fake"
+    binary = ""  # no external binary; always available
     supports_resume = False
 
     def build_argv(
