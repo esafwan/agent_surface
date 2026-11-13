@@ -235,6 +235,30 @@ written under the runtime dir (`--runtime-dir` to change it), never a fixed/gues
 credential. The board dependency (fastapi/uvicorn) is optional at import time — `serve` logs
 and runs headless if it's missing.
 
+## Resuming and launching a project
+
+Once a project has been initialized, you don't need to remember which stage, agent, or model you used. `surface init` and `surface serve` record those choices in the project's own database as a *launch profile*, and every explicit flag you pass to `serve` later updates it (last used wins).
+
+### `surface resume`
+
+    surface resume                 # current directory
+    surface resume ~/work/my-board # any project directory
+    surface resume --no-browser    # print the URL only
+    surface resume --with-agent    # also open your agent CLI in a new Terminal window (macOS)
+
+If the board is already running, `resume` just prints its URL and opens it in your browser. Otherwise it starts the board with the saved settings. Before starting, it checks that the configured agent CLI (for example `claude` or `codex`) is on your `PATH`, and it tells you how to fix things if not.
+
+### Double-click launcher (macOS)
+
+    surface app create            # writes "Open Surface Board.command" in the project
+    surface app create --force    # overwrite an existing one
+
+Double-click `Open Surface Board.command` in Finder to resume the project. The file works if you move the project folder. It finds `surface` through `$SURFACE_BIN`, then your login shell's `PATH`, then the path recorded when the file was created. If something fails, the Terminal window stays open so you can read the error. The first time you open it, macOS may ask you to confirm (right-click, then Open). The recorded fallback path is specific to this machine, so recreate the launcher on other machines rather than sharing it.
+
+### What "resume" does and doesn't restore
+
+`surface resume` restores everything that agent_surface owns: your artifacts, versions, board items, events, and settings, all stored in `.surface-board/`. It does **not** restore your coding agent's own conversation. That history lives inside the agent CLI (Claude Code, Codex, and so on) and agent_surface can't create, read, or repair it. `--with-agent` asks the CLI to continue its most recent session (for example `claude --continue`). If that session is gone, you get a fresh conversation. To help either way, `resume` prints a short summary of the project's current stage, open items, and recent events, which you can paste into a new session.
+
 ## CLI reference
 
 `--db PATH` is a **global** flag — it must come before the subcommand (default:

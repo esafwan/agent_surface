@@ -136,6 +136,15 @@ surface status
 
 Reports: DB exists, artifact count, counts by stage.
 
+### Resuming a Project
+
+Prefer `surface resume [PROJECT_DIR]` over rebuilding a `serve` command line by hand. It reuses the launch profile (stage, agent, model, timeout) saved by `init`/`serve`. If a board is already live (valid `run/port` + live `run/board.pid`), it only prints the URL, so it is safe to run when unsure. Do not start a second `serve` in that case.
+
+- Exit code 2 means a precondition is missing: no profile (run `surface init --stage ...`) or the profile's agent binary is not on `PATH`. Report the printed message to the user; don't silently switch agents.
+- `surface app create [--force]` writes a double-clickable `Open Surface Board.command` for the user. Never pass `--force` unless the user asked to replace it.
+- Your own conversation history is not part of agent_surface state. After a resume, treat the context summary that `resume` prints (stage, open items, recent events) and `surface project summary` as the source of truth. Do not assume you remember earlier turns.
+- The launch profile is updated only by explicit `serve` flags. Don't pass flags "just to be safe": that rewrites the user's saved choices.
+
 ---
 
 ## The Shipped Worker Does Not Generate
