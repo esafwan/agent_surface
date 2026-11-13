@@ -559,6 +559,45 @@ class SurfaceCLI:
             sock.bind((host, 0))
             return sock.getsockname()[1]
 
+    def _build_worker_command(
+        self,
+        base_command: Optional[List[str]] = None,
+        agent: Optional[str] = None,
+        agent_model: Optional[str] = None,
+        agent_timeout: float = 120,
+    ) -> tuple[List[str], int]:
+        """Build the worker subprocess command and compute transport timeout.
+
+        Returns:
+            A tuple of (command list, transport_timeout_seconds)
+        """
+        if base_command is None:
+            base_command = [
+                sys.executable,
+                "-m",
+                "surface.worker",
+                "--db",
+                str(Path(self.db_path).resolve()),
+            ]
+
+        command = list(base_command)  # Make a copy
+
+        # Extend command with agent flags if --agent is provided
+        if agent is not None:
+            command.extend(["--agent", agent])
+            if agent_model is not None:
+                command.extend(["--agent-model", agent_model])
+            command.extend(["--agent-timeout", str(agent_timeout)])
+
+        # Compute transport timeout: max(turn_timeout, agent_timeout + 30) when agent is set
+        turn_timeout = 300  # SupervisorConfig default
+        if agent is not None:
+            transport_timeout = max(turn_timeout, int(agent_timeout + 30))
+        else:
+            transport_timeout = turn_timeout
+
+        return command, transport_timeout
+
     def _build_board_blocks(self, store: Store, stage_config: StageConfig) -> Any:
         """Call build_board with whatever signature it currently exposes."""
         from surface.board import build_board
@@ -692,7 +731,10 @@ class SurfaceCLI:
               pool_size: int = 1,
               recycle_after_events: Optional[int] = None,
               recycle_after_tokens: Optional[int] = None,
-              renderer: str = "web") -> None:
+              renderer: str = "web",
+              agent: Optional[str] = None,
+              agent_model: Optional[str] = None,
+              agent_timeout: float = 120) -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
         Architecture (single process):
@@ -782,19 +824,20 @@ class SurfaceCLI:
             # Supervisor over a real worker subprocess
             # -----------------------------------------------------------------
             if transport is None:
-                command = worker_command or [
-                    sys.executable,
-                    "-m",
-                    "surface.worker",
-                    "--db",
-                    str(Path(self.db_path).resolve()),
-                ]
+                command, transport_timeout = self._build_worker_command(
+                    base_command=worker_command,
+                    agent=agent,
+                    agent_model=agent_model,
+                    agent_timeout=agent_timeout,
+                )
+
                 if worker_command is None and importlib.util.find_spec("surface.worker") is None:
                     logger.warning(
                         "surface.worker module not found; worker dispatch will fail "
                         "until it exists (expected: python -m surface.worker --db <path>)"
                     )
-                transport = NativeStreamTransport(command=command)
+
+                transport = NativeStreamTransport(command=command, timeout=transport_timeout)
 
             supervisor_config = SupervisorConfig(
                 worker_id="cli_worker",
@@ -1500,6 +1543,18 @@ def main():
         help="Recycle the worker session after this many reported tokens "
              "(inert unless a worker reports token usage)",
     )
+    serve_parser.add_argument(
+        "--agent", type=str, default=None,
+        help="Agent name for agentic worker (default: None = deterministic reference worker)",
+    )
+    serve_parser.add_argument(
+        "--agent-model", type=str, default=None,
+        help="Model ID for the agent (e.g., claude-opus-4, claude-sonnet-4)",
+    )
+    serve_parser.add_argument(
+        "--agent-timeout", type=float, default=120,
+        help="Agent turn timeout in seconds (default: 120)",
+    )
 
     # =========================================================================
     # Recovery CLI (SPEC section 45, 40)
@@ -1641,6 +1696,9 @@ def main():
             recycle_after_events=args.recycle_after_events,
             recycle_after_tokens=args.recycle_after_tokens,
             renderer=args.renderer,
+            agent=args.agent,
+            agent_model=args.agent_model,
+            agent_timeout=args.agent_timeout,
         )
 
     elif args.command == "stop":

@@ -6,13 +6,49 @@ using conceptual envelope: {"type":"event","event_id":"evt_143","payload":{...}}
 """
 
 import json
+import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import uuid
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+
+
+def _killpg_kill(process: subprocess.Popen) -> None:
+    """Kill the process's whole group (POSIX) so a grandchild it spawned --
+    e.g. a real coding-agent CLI shelled out to by the worker -- doesn't
+    survive as an orphan. Falls back to single-process kill elsewhere."""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
+    try:
+        process.kill()
+    except Exception:
+        pass
+
+
+def _killpg_interrupt(process: subprocess.Popen) -> None:
+    """Send SIGINT to the process's whole group (POSIX); see _killpg_kill."""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGINT)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
+    try:
+        process.send_signal(subprocess.signal.SIGINT)
+    except Exception:
+        pass
 
 
 class WorkerSession:
@@ -122,6 +158,10 @@ class NativeStreamTransport:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffering
+                # New session/process-group leader so a grandchild the
+                # worker spawns (e.g. a real agent CLI) can be reaped as a
+                # group on kill/interrupt instead of surviving as an orphan.
+                start_new_session=(os.name == "posix"),
             )
         except Exception as e:
             raise RuntimeError(f"Failed to spawn subprocess: {e}")
@@ -200,10 +240,7 @@ class NativeStreamTransport:
                 # never be reused; the caller (Supervisor) must start/resume
                 # a fresh worker session for the next turn.
                 worker_session.poisoned = True
-                try:
-                    worker_session.process.kill()
-                except Exception:
-                    pass
+                _killpg_kill(worker_session.process)
                 return {
                     "ok": False,
                     "error": "timeout",
@@ -247,8 +284,7 @@ class NativeStreamTransport:
             return {"ok": False, "error": "Worker process is not running"}
 
         try:
-            # Send interrupt signal (SIGINT)
-            worker_session.process.send_signal(subprocess.signal.SIGINT)
+            _killpg_interrupt(worker_session.process)
             worker_session.update_activity()
             return {"ok": True, "message": "Interrupt signal sent"}
         except Exception as e:
@@ -284,8 +320,8 @@ class NativeStreamTransport:
             worker_session.process.terminate()
             worker_session.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            # Force kill if terminate didn't work
-            worker_session.process.kill()
+            # Force kill (whole process group) if terminate didn't work
+            _killpg_kill(worker_session.process)
             worker_session.process.wait()
         except Exception:
             pass

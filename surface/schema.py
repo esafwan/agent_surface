@@ -2,7 +2,7 @@ import sqlite3
 from typing import Union, Optional
 from pathlib import Path
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 INIT_SQL = """
 PRAGMA journal_mode = WAL;
@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS versions (
     UNIQUE(artifact_id, n)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_artifact_source_event
+    ON versions(artifact_id, source_event_id)
+    WHERE source_event_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS artifact_dependencies (
     upstream_artifact_id TEXT NOT NULL,
     downstream_artifact_id TEXT NOT NULL,
@@ -61,6 +65,17 @@ CREATE TABLE IF NOT EXISTS artifact_dependencies (
     PRIMARY KEY (upstream_artifact_id, downstream_artifact_id),
     FOREIGN KEY (upstream_artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
     FOREIGN KEY (downstream_artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS version_inputs (
+    version_id TEXT NOT NULL,
+    upstream_artifact_id TEXT NOT NULL,
+    upstream_version_id TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (version_id, upstream_artifact_id),
+    FOREIGN KEY (version_id) REFERENCES versions(id) ON DELETE CASCADE,
+    FOREIGN KEY (upstream_artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
+    FOREIGN KEY (upstream_version_id) REFERENCES versions(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -141,6 +156,16 @@ def init_db(db_path: Union[str, Path, sqlite3.Connection]) -> sqlite3.Connection
     if not row:
         cursor.execute(
             "INSERT INTO runtime (key, value) VALUES ('schema_version', ?)",
+            (SCHEMA_VERSION,),
+        )
+        conn.commit()
+    elif row["value"] != SCHEMA_VERSION:
+        # INIT_SQL's CREATE TABLE IF NOT EXISTS already brought an older DB's
+        # tables up to date (additive-only migrations so far); record that
+        # the upgrade happened so a future migration that branches on this
+        # value doesn't mistake an upgraded DB for one still on schema 1.
+        cursor.execute(
+            "UPDATE runtime SET value = ? WHERE key = 'schema_version'",
             (SCHEMA_VERSION,),
         )
         conn.commit()

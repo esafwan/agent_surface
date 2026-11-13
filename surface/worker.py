@@ -23,15 +23,81 @@ Response format (checked by supervisor.py):
 """
 
 import json
+import os
 import sys
 import argparse
 from typing import Any, Dict, Optional
 
 from surface.store import Store
 from surface.stages.config import StageConfig, StageConfigError
+from surface.agents.base import AgentError
+from surface.agents.prompt import build_prompt
+from surface.agents.registry import get_backend
+from surface.agents.runner import run_agent
 
 
-def handle_event(event: Dict[str, Any], store: Store) -> Dict[str, Any]:
+class AgentConfig:
+    """Holds the optional real-agent backend config for this worker process.
+
+    When `name` is None (the default), every handler behaves exactly as the
+    deterministic reference worker always has -- this is what keeps the 411+
+    pre-existing tests passing unchanged.
+    """
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: float = 120,
+        log_dir: Optional[str] = None,
+    ):
+        self.name = name
+        self.model = model
+        self.timeout = timeout
+        self.log_dir = log_dir
+
+    @property
+    def enabled(self) -> bool:
+        return self.name is not None
+
+
+def _generate_agent_content(
+    agent_config: "AgentConfig",
+    *,
+    event_type: str,
+    note_or_message: str,
+    selected_content: str,
+    artifact_stage: str,
+) -> str:
+    """Run the configured real-agent backend and return its proposed content.
+
+    Raises AgentError on any backend failure (timeout/crash/bad_output/auth/
+    rate_limit) -- the caller maps that to the normal {"ok": False, ...}
+    retry path, exactly like any other handler exception.
+    """
+    backend = get_backend(agent_config.name)
+    prompt = build_prompt({
+        "event_type": event_type,
+        "note_or_message": note_or_message,
+        "selected_content": selected_content,
+        "artifact_stage": artifact_stage,
+    })
+    reply = run_agent(
+        backend,
+        prompt,
+        model=agent_config.model,
+        timeout=agent_config.timeout,
+        workdir=os.getcwd(),
+        log_dir=agent_config.log_dir,
+    )
+    return reply.text
+
+
+def handle_event(
+    event: Dict[str, Any],
+    store: Store,
+    agent_config: Optional["AgentConfig"] = None,
+) -> Dict[str, Any]:
     """
     Handle a single event from the inbox.
 
@@ -50,6 +116,7 @@ def handle_event(event: Dict[str, Any], store: Store) -> Dict[str, Any]:
     payload = event.get("payload", {})
     artifact_id = event.get("artifact_id")
     config = event.get("config", {})
+    agent_config = agent_config or AgentConfig()
 
     try:
         # Handle user event types (SPEC section 13)
@@ -57,7 +124,7 @@ def handle_event(event: Dict[str, Any], store: Store) -> Dict[str, Any]:
             return _handle_edit(artifact_id, payload, event_id, store)
 
         elif event_type == "revise":
-            return _handle_revise(artifact_id, payload, event_id, store, config)
+            return _handle_revise(artifact_id, payload, event_id, store, config, agent_config)
 
         elif event_type == "regenerate":
             return _handle_regenerate(artifact_id, payload, event_id, store, config)
@@ -81,7 +148,7 @@ def handle_event(event: Dict[str, Any], store: Store) -> Dict[str, Any]:
             return _handle_unlock(artifact_id, payload, event_id, store)
 
         elif event_type == "message":
-            return _handle_message(artifact_id, payload, event_id, store)
+            return _handle_message(artifact_id, payload, event_id, store, config, agent_config)
 
         # Handle system event types (SPEC section 14)
         elif event_type == "job_done":
@@ -99,6 +166,8 @@ def handle_event(event: Dict[str, Any], store: Store) -> Dict[str, Any]:
         else:
             return {"ok": False, "error": f"Unknown event type: {event_type}"}
 
+    except AgentError as e:
+        return {"ok": False, "error": f"agent:{e.kind}: {e.message}"}
     except Exception as e:
         return {"ok": False, "error": f"Exception in {event_type}: {str(e)}"}
 
@@ -144,17 +213,31 @@ def _handle_edit(
 _GENERATION_ARTIFACT_TYPES = ("image", "video")
 
 
+def _find_version_for_event(store: Store, artifact_id: str, event_id: str) -> Optional[Dict[str, Any]]:
+    """Find an existing version already written for this (artifact_id,
+    event_id), if any -- used to skip re-invoking a real agent backend on a
+    retried event (store.put_version's own source_event_id dedupe already
+    makes the WRITE idempotent, but without this check a retry would still
+    burn a redundant, possibly non-deterministic, real agent call first)."""
+    for version in store.list_versions(artifact_id):
+        if version.get("source_event_id") == event_id:
+            return version
+    return None
+
+
 def _handle_revise(
     artifact_id: Optional[str],
     payload: Dict[str, Any],
     event_id: str,
     store: Store,
     config: Dict[str, Any],
+    agent_config: Optional["AgentConfig"] = None,
 ) -> Dict[str, Any]:
     """
     Handle revise action.
-    For text artifacts: create a new version with the note.
-    For image/video artifacts: create a job.
+    For text artifacts: create a new version with the note (either
+    unchanged, or -- when a real agent backend is configured -- proposed by
+    that agent). For image/video artifacts: create a job.
     Per SPEC section 13: revise example has payload with "note".
     """
     if not artifact_id:
@@ -187,15 +270,34 @@ def _handle_revise(
         else:
             content = ""
 
+        # A real agent backend proposes the new content; without one, the
+        # deterministic reference behavior (re-commit the selected content
+        # unchanged, with the note attached) is unchanged from before.
+        if agent_config and agent_config.enabled:
+            existing = _find_version_for_event(store, artifact_id, event_id)
+            if existing is None:
+                content = _generate_agent_content(
+                    agent_config,
+                    event_type="revise",
+                    note_or_message=note,
+                    selected_content=content,
+                    artifact_stage=artifact.get("stage", ""),
+                )
+            # else: a version for this event already exists (retry) --
+            # store.put_version's own source_event_id dedupe below will
+            # return it without writing again, and we must not call the
+            # agent a second time for a non-deterministic model.
+
+        created_by = f"agent:{agent_config.name}" if (agent_config and agent_config.enabled) else "worker"
         try:
             result = store.put_version(
                 artifact_id,
-                content=content,  # Could be enhanced by worker reasoning
+                content=content,
                 prompt=None,
                 note=note,
                 source_event_id=event_id,
                 select=True,
-                created_by="worker",
+                created_by=created_by,
             )
             return {"ok": True, "version_id": result.get("version_id")}
         except Exception as e:
@@ -232,6 +334,35 @@ def _handle_regenerate(
     return _create_generation_job(
         artifact_id, artifact, event_id, store, config, cost_estimate=cost_estimate
     )
+
+
+def _capture_dispatch_inputs_snapshot(store: Store, artifact_id: str) -> Dict[str, str]:
+    """Snapshot, at job-dispatch time, what each upstream's selected version
+    currently is.
+
+    This mirrors `Store.put_version`'s own auto-capture logic (see its
+    docstring: "When `inputs` is omitted, it is auto-captured from the
+    *current* `artifact_dependencies` graph: for every upstream of this
+    artifact, whatever that upstream's `selected_version_id` is right now is
+    recorded.") -- but computed NOW, at dispatch, via the public
+    `get_graph`/`get_artifact` API, so it can be persisted on the job and
+    replayed unchanged at completion time instead of being re-derived from
+    (by-then possibly different) current state.
+
+    Returns an `{upstream_artifact_id: upstream_version_id}` mapping in the
+    exact shape `put_version(..., inputs=...)` expects. Upstreams with no
+    selected version yet are omitted, matching put_version's own behavior.
+    """
+    snapshot: Dict[str, str] = {}
+    graph = store.get_graph(artifact_id)
+    for upstream in graph.get("upstreams", []):
+        up_id = upstream.get("upstream_artifact_id")
+        if not up_id:
+            continue
+        up_artifact = store.get_artifact(up_id)
+        if up_artifact and up_artifact.get("selected_version_id"):
+            snapshot[up_id] = up_artifact["selected_version_id"]
+    return snapshot
 
 
 _JOB_STATUSES = ("queued", "running", "succeeded", "failed", "cancelled")
@@ -300,6 +431,17 @@ def _create_generation_job(
 
         # Construct request with artifact's selected version content/prompt
         request = {"note": note, "source_event_id": event_id}
+
+        # Capture, right now (dispatch time), what each upstream's selected
+        # version currently is, and stash it in the job's own request blob
+        # (`request_json`) so the poller can pass it as `put_version(...,
+        # inputs=...)` when the job completes -- instead of put_version
+        # auto-capturing whatever is selected THEN, which may have moved
+        # while the job was in flight. See _capture_dispatch_inputs_snapshot.
+        dispatch_inputs_snapshot = _capture_dispatch_inputs_snapshot(store, artifact_id)
+        if dispatch_inputs_snapshot:
+            request["_dispatch_inputs_snapshot"] = dispatch_inputs_snapshot
+
         if artifact["selected_version_id"]:
             selected_ver = store.get_version(artifact["selected_version_id"])
             if selected_ver:
@@ -547,11 +689,18 @@ def _handle_message(
     payload: Dict[str, Any],
     event_id: str,
     store: Store,
+    config: Optional[Dict[str, Any]] = None,
+    agent_config: Optional["AgentConfig"] = None,
 ) -> Dict[str, Any]:
     """
     Handle message action: free-form escape hatch.
     No required store mutation; just acknowledge.
     Per SPEC section 13: message is the free-form escape hatch.
+
+    `config`/`agent_config` are accepted for call-site symmetry with the
+    other agent-aware handlers, but message intentionally stays a pure
+    acknowledgment (it has no artifact-mutation contract to hand an agent's
+    output to) -- behavior here is unchanged regardless of agent_config.
     """
     # Message is acknowledged but no action taken
     return {"ok": True}
@@ -649,13 +798,25 @@ def _get_provider_for_stage(stage_id: str, config: Dict[str, Any]) -> Optional[s
     return None
 
 
-def run_worker(db_path: str) -> None:
+def run_worker(
+    db_path: str,
+    agent: Optional[str] = None,
+    agent_model: Optional[str] = None,
+    agent_timeout: float = 120,
+) -> None:
     """
     Main worker loop.
     Reads JSON event envelopes from stdin, processes them, writes results to stdout.
     Per SPEC section 20: native stream transport uses JSON/JSONL over stdin/stdout.
+
+    When `agent` is None (the default), behavior is byte-identical to the
+    original deterministic reference worker. When set, `revise` (on
+    non-generation artifact types) is answered by that real agent CLI
+    backend instead of re-committing the selected content unchanged.
     """
     store = Store(db_path)
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "agent_logs") if agent else None
+    agent_config = AgentConfig(name=agent, model=agent_model, timeout=agent_timeout, log_dir=log_dir)
 
     try:
         for line in sys.stdin:
@@ -665,7 +826,7 @@ def run_worker(db_path: str) -> None:
 
             try:
                 event = json.loads(line)
-                result = handle_event(event, store)
+                result = handle_event(event, store, agent_config)
             except json.JSONDecodeError as e:
                 result = {"ok": False, "error": f"Invalid JSON: {str(e)}"}
             except Exception as e:
@@ -694,6 +855,24 @@ if __name__ == "__main__":
         default=":memory:",
         help="Path to SQLite database (default: :memory:)",
     )
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default=None,
+        help="Real agent backend name (e.g. opencode, codex, agy); default: deterministic reference worker",
+    )
+    parser.add_argument(
+        "--agent-model",
+        type=str,
+        default=None,
+        help="Model ID to pass to the agent backend",
+    )
+    parser.add_argument(
+        "--agent-timeout",
+        type=float,
+        default=120,
+        help="Per-turn timeout in seconds for the agent backend",
+    )
     args = parser.parse_args()
 
-    run_worker(args.db)
+    run_worker(args.db, agent=args.agent, agent_model=args.agent_model, agent_timeout=args.agent_timeout)

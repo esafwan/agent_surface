@@ -817,7 +817,7 @@ function cardAsk(card, stage, minimal) {
     return settled("Cancelled." + (has("reopen") ? " Reopen it if you still want it." : ""));
   if (card.status === "approved")
     return settled("Approved — nothing to do." + (has("reopen") ? " Reopen it if you've changed your mind." : ""));
-  if (card.status === "stale") {
+  if (card.freshness && !card.freshness.fresh) {
     const why = card.stale_reason ? ": " + card.stale_reason : "";
     return live("An upstream change landed after this was written" + why + ". Re-check it before approving.");
   }

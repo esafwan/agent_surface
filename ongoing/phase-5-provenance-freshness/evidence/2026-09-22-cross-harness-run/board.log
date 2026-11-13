@@ -1,0 +1,2 @@
+BOARD_URL=http://127.0.0.1:7921
+TOKEN=<redacted -- was a real basic-auth token for a board instance bound to 127.0.0.1, stopped after the run>

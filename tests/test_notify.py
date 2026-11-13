@@ -252,17 +252,39 @@ class TestDetectNotifications:
         assert "failed status" in result[0]["message"]
 
     def test_detect_new_stale_artifacts(self):
-        """Verify detection of stale artifacts."""
+        """Verify detection of stale artifacts via freshness change."""
         store = Store(":memory:")
+
+        # Create artifacts to make one stale
+        store.create_artifact("upstream", "script", "Upstream", status="draft")
+        store.create_artifact("downstream", "shots", "Downstream", status="review")
+        store.create_artifact("other", "shots", "Other", status="review")
+
+        # Create initial version for upstream
+        store.put_version("upstream", content="v1", select=True)
+
+        # Add dependency BEFORE creating downstream version
+        store.add_dependency("upstream", "downstream")
+
+        # Create versions for downstream and other (downstream auto-captures upstream dep)
+        store.put_version("downstream", content="v1", select=True)
+        store.put_version("other", content="v1", select=True)
+
+        # Previous state: no stale artifacts
         previous = {
-            "total_artifacts": 5,
+            "total_artifacts": 3,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 3, "review": 2, "stale": 0},
+            "by_status": {"draft": 1, "review": 2},
         }
+
+        # Update upstream to make downstream stale
+        store.put_version("upstream", content="v2", select=True)
+
+        # Current state should detect 1 stale artifact
         current = {
-            "total_artifacts": 5,
+            "total_artifacts": 3,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 2, "review": 2, "stale": 1},
+            "by_status": {"draft": 1, "review": 2},
         }
 
         result = detect_notifications(store, previous_summary=previous, current_summary=current)
@@ -271,6 +293,79 @@ class TestDetectNotifications:
         assert result[0]["kind"] == "stale"
         assert result[0]["count"] == 1
         assert "stale" in result[0]["message"]
+
+    def test_detect_stale_does_not_repeat_fire_on_same_artifacts(self):
+        """Verify stale notification fires only once when same artifacts remain stale.
+
+        Regression test for bug where detect_notifications would re-fire the same
+        stale notification every poll because detect_notifications wasn't updating
+        the current_summary["by_status"]["stale"] to reflect the real stale count.
+
+        So when the caller used the current_summary as the baseline for the next poll,
+        the stale count was still 0 (or whatever old value), causing the comparison
+        current_stale > previous_stale to always be true.
+
+        Scenario:
+        1. Initial state: 0 stale artifacts
+        2. First poll: 1 artifact becomes stale -> should NOTIFY (count=1)
+        3. Second poll with SAME state: should NOT notify
+           - Without fix: fires again because baseline is still 0
+           - With fix: does not fire because detect_notifications updates the summary
+        """
+        store = Store(":memory:")
+
+        # Create simple dependency: upstream -> downstream
+        store.create_artifact("upstream", "script", "Upstream", status="draft")
+        store.create_artifact("downstream", "shots", "Downstream", status="review")
+
+        # Create initial versions
+        store.put_version("upstream", content="v1", select=True)
+
+        # Add dependency
+        store.add_dependency("upstream", "downstream")
+
+        # Create downstream version after dependency
+        store.put_version("downstream", content="v1", select=True)
+
+        # Initial state: no stale
+        initial = {
+            "total_artifacts": 2,
+            "by_stage": {"script": 1, "shots": 1},
+            "by_status": {"draft": 1, "review": 1},
+        }
+
+        # Poll 1: Make upstream stale, should notify
+        store.put_version("upstream", content="v2", select=True)
+        current_after_first = {
+            "total_artifacts": 2,
+            "by_stage": {"script": 1, "shots": 1},
+            "by_status": {"draft": 1, "review": 1},
+        }
+        result1 = detect_notifications(store, previous_summary=initial, current_summary=current_after_first)
+        assert len(result1) == 1, "First poll should fire stale notification"
+        assert result1[0]["kind"] == "stale"
+        assert result1[0]["count"] == 1, "Should detect 1 newly stale"
+
+        # The fix: detect_notifications should have updated current_summary["by_status"]["stale"]
+        # to reflect the actual current stale count (1). If it didn't, the value is still missing.
+        assert current_after_first["by_status"].get("stale") == 1, (
+            "detect_notifications should update current_summary["
+            '"by_status"]["stale"] to the real stale count'
+        )
+
+        # Poll 2: No new changes - downstream is still stale
+        # Since current_summary was updated by detect_notifications, the baseline is now correct
+        current_after_second = {
+            "total_artifacts": 2,
+            "by_stage": {"script": 1, "shots": 1},
+            "by_status": {"draft": 1, "review": 1},
+        }
+        result2 = detect_notifications(store, previous_summary=current_after_first, current_summary=current_after_second)
+        assert len(result2) == 0, (
+            "Second poll should NOT notify: no NEW staleness since last baseline. "
+            "Bug: if detect_notifications doesn't update current_summary['by_status']['stale'], "
+            "the baseline stays 0 and 1 > 0 fires every time"
+        )
 
     def test_detect_pending_review_0_to_positive(self):
         """Verify detection of review going from 0 to positive."""
@@ -317,15 +412,44 @@ class TestDetectNotifications:
     def test_detect_multiple_changes(self):
         """Verify multiple simultaneous changes are all detected."""
         store = Store(":memory:")
+
+        # Create artifacts to simulate the state changes
+        store.create_artifact("art_1", "script", "A1", status="draft")
+        store.create_artifact("art_2", "shots", "A2", status="draft")
+        store.create_artifact("art_3", "shots", "A3", status="review")
+        store.create_artifact("art_4", "script", "A4", status="review")
+        store.create_artifact("art_5", "shots", "A5", status="approved")
+
+        # Create version for art_1 and art_4 first
+        store.put_version("art_1", content="v1", select=True)
+        store.put_version("art_4", content="v1", select=True)
+
+        # Add dependencies BEFORE creating downstream versions
+        store.add_dependency("art_1", "art_2")
+        store.add_dependency("art_1", "art_3")
+        store.add_dependency("art_4", "art_3")
+
+        # Create versions for downstream artifacts (after dependencies)
+        store.put_version("art_2", content="v1", select=True)
+        store.put_version("art_3", content="v1", select=True)
+        store.put_version("art_5", content="v1", select=True)
+
+        # Previous state: no stale, 0 failed
         previous = {
             "total_artifacts": 5,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 2, "review": 2, "approved": 1, "failed": 0, "stale": 0},
+            "by_status": {"draft": 2, "review": 2, "approved": 1},
         }
+
+        # Make changes: mark art_2 as failed, update art_1 to make art_2 and art_3 stale
+        store.set_status("art_2", "failed")
+        store.put_version("art_1", content="v2", select=True)
+
+        # Current state should show 2 stale, 1 failed
         current = {
             "total_artifacts": 5,
             "by_stage": {"script": 1, "shots": 2},
-            "by_status": {"draft": 0, "review": 1, "approved": 1, "failed": 1, "stale": 2},
+            "by_status": {"draft": 1, "review": 1, "approved": 1, "failed": 1},
         }
 
         result = detect_notifications(store, previous_summary=previous, current_summary=current)

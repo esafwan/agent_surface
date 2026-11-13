@@ -5,6 +5,86 @@ from surface.poller import Poller, get_project_cost_summary
 from surface.providers.image import MockImageProvider
 from surface.providers.video import MockVideoProvider
 from surface.store import Store
+from surface.worker import _create_generation_job
+
+
+class TestPollerDispatchTimeInputsSnapshot:
+    """End-to-end: a slow job's completion must record what upstream looked
+    like at DISPATCH time, not whatever is selected when it finally lands.
+
+    This drives the real worker -> store -> poller path (worker.py's
+    _create_generation_job captures the snapshot into the job's request at
+    dispatch time; poller.py's _handle_job_success reads it back and passes
+    it to put_version(inputs=...) at completion time) -- the end-to-end
+    version of tests/test_freshness_properties.py's
+    test_late_job_result_arrives_stale, which only simulated this at the
+    Store level directly.
+    """
+
+    def test_late_job_result_arrives_stale_end_to_end(self):
+        store = Store(":memory:")
+
+        # Build A -> B chain, B generated via an image job.
+        store.create_artifact(id="A", stage="upstream", title="A")
+        store.create_artifact(id="B", stage="keyframes", title="B")
+        store.add_dependency("A", "B")
+
+        v1_A = store.put_version("A", content="A v1", select=True)["version_id"]
+
+        config = {
+            "stages": [
+                {"id": "keyframes", "artifact_type": "image", "generation": {"provider": "image"}},
+            ]
+        }
+
+        # Dispatch a job for B. This is the moment worker.py captures A's
+        # currently-selected version (v1_A) into the job's request via
+        # _capture_dispatch_inputs_snapshot.
+        artifact_B = store.get_artifact("B")
+        dispatch_result = _create_generation_job(
+            "B", artifact_B, "evt_dispatch_1", store, config, cost_estimate=0.0
+        )
+        assert dispatch_result["ok"] is True
+        job_id = dispatch_result["job_id"]
+
+        job = store.get_job(job_id)
+        assert job["request"]["_dispatch_inputs_snapshot"] == {"A": v1_A}
+
+        # BEFORE the job completes, A gets a new selected version.
+        v2_A = store.put_version("A", content="A v2", select=True)["version_id"]
+        assert v2_A != v1_A
+
+        # Now the (slow) job finally completes, driven through the real
+        # poller completion path -- not a direct store.put_version() call.
+        provider = MockImageProvider(polls_to_success=1)
+        poller = Poller(store, {"image": provider})
+        poller.poll_once()  # submits to provider
+        poller.poll_once()  # first status check
+        poller.poll_once()  # provider reports success -> _handle_job_success
+
+        job_after = store.get_job(job_id)
+        assert job_after["status"] == "succeeded"
+
+        versions_B = store.list_versions("B")
+        assert len(versions_B) == 1
+        version_B = versions_B[0]
+
+        # The version poller.py created must have recorded A's dispatch-time
+        # version (v1_A) as its input, not A's current version (v2_A).
+        rows = store.conn.execute(
+            "SELECT upstream_artifact_id, upstream_version_id FROM version_inputs WHERE version_id = ?",
+            (version_B["id"],),
+        ).fetchall()
+        recorded_inputs = {r["upstream_artifact_id"]: r["upstream_version_id"] for r in rows}
+        assert recorded_inputs == {"A": v1_A}
+
+        # And therefore B must be born stale: it was built against A's OLD
+        # version, but A has since moved to v2_A.
+        freshness = store.compute_freshness("B")
+        assert freshness["fresh"] is False, (
+            "B's version, born from a late job result carrying a stale "
+            "dispatch-time snapshot, should be immediately stale"
+        )
 
 
 class TestPollerBasicFlow:

@@ -322,7 +322,12 @@ def build_dependency_graph_mermaid(store: Store, artifact_id: str) -> Dict[str, 
         locked = bool(neighbor.get("locked")) if neighbor else False
         node = _mermaid_node_id(up_id)
         lines.append(f'    {node}["{_mermaid_label(title, up_id, locked)}"] --> {center_node}')
-        if status in STATUS_STYLE:
+        # Determine style from freshness first (stale via computed staleness),
+        # then fall back to status (approved/failed are set explicitly).
+        freshness = neighbor.get("freshness", {}) if neighbor else {}
+        if not freshness.get("fresh", True):
+            style_lines.append(f"    style {node} {STATUS_STYLE['stale']}")
+        elif status in STATUS_STYLE:
             style_lines.append(f"    style {node} {STATUS_STYLE[status]}")
 
     for down in downstreams:
@@ -336,7 +341,12 @@ def build_dependency_graph_mermaid(store: Store, artifact_id: str) -> Dict[str, 
         locked = bool(neighbor.get("locked")) if neighbor else False
         node = _mermaid_node_id(down_id)
         lines.append(f'    {center_node} --> {node}["{_mermaid_label(title, down_id, locked)}"]')
-        if status in STATUS_STYLE:
+        # Determine style from freshness first (stale via computed staleness),
+        # then fall back to status (approved/failed are set explicitly).
+        freshness = neighbor.get("freshness", {}) if neighbor else {}
+        if not freshness.get("fresh", True):
+            style_lines.append(f"    style {node} {STATUS_STYLE['stale']}")
+        elif status in STATUS_STYLE:
             style_lines.append(f"    style {node} {STATUS_STYLE[status]}")
 
     lines.extend(style_lines)

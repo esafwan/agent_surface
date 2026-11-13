@@ -234,6 +234,16 @@ class Poller:
             # and only pass cost_actual through to the store when present.
             actual_cost = result.get("actual_cost")
 
+            # Use the dispatch-time input snapshot the worker captured (see
+            # worker.py::_capture_dispatch_inputs_snapshot) and stashed in
+            # the job's request blob, if present, so this version records
+            # what each upstream's selected version WAS when the job was
+            # dispatched -- not whatever happens to be selected now that the
+            # (possibly slow) job has finally completed. Falls back to
+            # put_version's own current-state auto-capture (inputs=None) for
+            # jobs created before this existed, or with no upstreams.
+            dispatch_inputs_snapshot = job.get("request", {}).get("_dispatch_inputs_snapshot")
+
             # Create new artifact version with result. Use the job_id as the
             # idempotency key: job_id is stable and unique per job, so a
             # crash/restart that re-observes the same provider success will
@@ -248,6 +258,7 @@ class Poller:
                 note="Generated via provider",
                 source_event_id=f"job:{job_id}",
                 select=True,  # Auto-select unless cancelled
+                inputs=dispatch_inputs_snapshot,
             )
 
             # A successful generation moves the artifact out of "generating"

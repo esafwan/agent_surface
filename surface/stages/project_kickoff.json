@@ -1,0 +1,114 @@
+{
+  "schema_version": "1",
+  "id": "project_kickoff",
+  "title": "Project Kickoff Artifact",
+  "stages": [
+    {
+      "id": "kickoff",
+      "artifact_type": "form",
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true,
+      "form_schema": {
+        "type": "object",
+        "properties": {
+          "project_name": {
+            "type": "string",
+            "title": "Project Name"
+          },
+          "audience": {
+            "type": "string",
+            "title": "Target Audience"
+          },
+          "goals": {
+            "type": "array",
+            "title": "Project Goals",
+            "items": {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "type": "string",
+                  "title": "Goal"
+                },
+                "priority": {
+                  "type": "string",
+                  "enum": ["critical", "high", "medium", "low"]
+                }
+              },
+              "required": ["goal"]
+            }
+          },
+          "pages": {
+            "type": "array",
+            "title": "Pages/Sections",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "title": "Page Name"
+                },
+                "description": {
+                  "type": "string",
+                  "title": "Description"
+                }
+              },
+              "required": ["name"]
+            }
+          },
+          "integrations": {
+            "type": "array",
+            "title": "Required Integrations",
+            "items": {
+              "type": "string",
+              "title": "Integration Name"
+            }
+          },
+          "priorities": {
+            "type": "array",
+            "title": "Priority Tasks",
+            "items": {
+              "type": "string",
+              "title": "Priority Item"
+            }
+          },
+          "open_questions": {
+            "type": "array",
+            "title": "Open Questions",
+            "items": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string",
+                  "title": "Question"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["unanswered", "in_progress", "resolved"]
+                }
+              },
+              "required": ["question"]
+            }
+          },
+          "timeline": {
+            "type": "string",
+            "title": "Project Timeline"
+          },
+          "budget_estimate": {
+            "type": "string",
+            "title": "Budget Estimate"
+          }
+        }
+      }
+    },
+    {
+      "id": "review",
+      "artifact_type": "text",
+      "depends_on": ["kickoff"],
+      "allowed_actions": ["edit", "revise", "approve", "reopen"],
+      "approval_required": true
+    }
+  ],
+  "completion": {
+    "require_approved_stages": ["kickoff", "review"]
+  }
+}

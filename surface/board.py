@@ -64,6 +64,7 @@ class ArtifactDisplayCard:
     has_generating_job: bool = False
     stale_reason: Optional[str] = None
     updated_at: str = ""
+    freshness: Optional[Dict[str, Any]] = None
     # --- Unresolved inbox work referencing THIS artifact -------------------
     # The click already landed in the store; nothing visible has changed yet.
     # `pending_event_count` is waiting for a worker to claim it,
@@ -97,6 +98,7 @@ class ArtifactDisplayCard:
             "has_generating_job": self.has_generating_job,
             "stale_reason": self.stale_reason,
             "updated_at": self.updated_at,
+            "freshness": self.freshness,
             "pending_event_count": self.pending_event_count,
             "processing_event_count": self.processing_event_count,
             "queued_event_types": list(self.queued_event_types),
@@ -209,7 +211,7 @@ class DisplayModelBuilder:
                     display_model.pending_review_count += 1
                 if artifact_card.status == "generating":
                     display_model.generating_artifacts.add(artifact_card.artifact_id)
-                if artifact_card.status == "stale":
+                if artifact_card.stale_reason:
                     display_model.stale_artifacts.add(artifact_card.artifact_id)
                 if artifact_card.status == "failed":
                     display_model.failed_artifacts.add(artifact_card.artifact_id)
@@ -328,6 +330,23 @@ class DisplayModelBuilder:
             processing_events[0].get("claimed_at") if processing_events else None
         )
 
+        # Populate stale_reason from freshness.stale_because. Each entry is
+        # {"upstream_artifact_id": ..., "reason": "changed" | "no_record"} --
+        # render each with its own reason so "an upstream changed" and "no
+        # provenance record for this upstream" don't look identical.
+        stale_reason = None
+        freshness = artifact.get("freshness", {})
+        if not freshness.get("fresh", True):
+            stale_because = freshness.get("stale_because", [])
+            if stale_because:
+                parts = [
+                    f"{entry['upstream_artifact_id']} ({entry['reason']})"
+                    for entry in stale_because
+                ]
+                stale_reason = f"stale (upstream: {', '.join(parts)})"
+            else:
+                stale_reason = "stale"
+
         card = ArtifactDisplayCard(
             artifact_id=artifact_id,
             stage=artifact["stage"],
@@ -339,7 +358,9 @@ class DisplayModelBuilder:
             allowed_actions=stage_obj.allowed_actions,
             approval_required=stage_obj.approval_required,
             has_generating_job=has_generating_job,
+            stale_reason=stale_reason,
             updated_at=artifact.get("updated_at", ""),
+            freshness=freshness,
             pending_event_count=len(pending_events),
             processing_event_count=len(processing_events),
             queued_event_types=[str(e.get("type")) for e in active_events],
@@ -1195,7 +1216,7 @@ def format_artifact_meta(card: ArtifactDisplayCard) -> str:
         parts.append("🔒 locked")
     if card.has_generating_job:
         parts.append("⚙️ generating")
-    if card.status == "stale" or card.stale_reason:
+    if card.stale_reason:
         parts.append("⚠️ stale")
     return " &nbsp;·&nbsp; ".join(parts)
 

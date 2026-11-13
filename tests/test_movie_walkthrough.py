@@ -238,10 +238,14 @@ class TestMovieWalkthroughRealArchitecture:
         assert script_artifact["selected_version_id"] == script_versions[0]["id"]
 
         # ------------------------------------------------------------------
-        # STEP 2: dependents become stale (put_version->select triggers propagation)
+        # STEP 2: script now has a version; dependents have no versions yet so are vacuously fresh
+        # (Staleness is only meaningful for artifacts with selected versions; empty artifacts are fresh.)
         # ------------------------------------------------------------------
         for key in ("shots", "keyframes", "keyframes_2", "clips", "clips_2", "assembly"):
-            assert store.get_artifact(ids[key])["status"] == "stale", key
+            # These artifacts have no versions yet, so they're vacuously fresh
+            art = store.get_artifact(ids[key])
+            assert art["selected_version_id"] is None
+            assert art["freshness"]["fresh"] is True
 
         # Approve script via a real `approve` event.
         movie_config.validate_action("script", "approve")

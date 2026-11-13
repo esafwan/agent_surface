@@ -130,6 +130,33 @@ The default web renderer (`--renderer web`) includes:
 - **Version diff**: text artifacts with 2+ versions (when the selected version isn't the first) show a "Compare to previous version" control, with server-side line-by-line diffs computed fresh on each load. Not shown for form/image/video/audio content, which the diff endpoint doesn't support.
 - **Dependency graph view**: a "Dependencies" button on any card displays its upstream/downstream neighbors as a status-colored Mermaid graph, updating live without restart.
 
+## Real agent backends
+
+`surface serve --agent <name> [--agent-model <id>] [--agent-timeout <seconds>]` puts a real
+coding-agent CLI (opencode, codex, or agy) behind the board's `revise` action, through the
+real production dispatch path: the `Supervisor` → `NativeStreamTransport` → `surface worker`
+subprocess chain, no bypass scripts. Not a demo — this is the exact same code path a
+deterministic reference worker would take, except with a real network-calling CLI plugged in.
+
+**CLI invocation details**: See [`docs/agent-backends.md`](docs/agent-backends.md) for exact
+non-interactive invocation templates and model ID formats per backend (e.g. `opencode-go/glm-5.3`
+for opencode, `claude-sonnet-4` for codex, `claude-opus-4-6-thinking` for agy).
+
+**Backends proven to converge**: `fake`, `opencode` (model `opencode-go/glm-5.3`), `codex`,
+and `agy` have each been proven via a real, repeated soak test (`scripts/agent_soak.py`)
+against the live `surface serve` process over real HTTP — real board API calls, not a bypass
+script. All three real backends hit 5/5 converged runs, including a run where the worker
+subprocess is SIGKILLed mid-turn to prove automatic recovery, with zero orphaned processes
+on every run. Logs are committed under
+[`ongoing/phase-1-2-harden-generalize/live_runs/`](ongoing/phase-1-2-harden-generalize/live_runs/).
+`kimi` is scaffolded in the CLI reference doc only — this machine's subscription doesn't
+currently have access, so it was dropped from the registered backends.
+
+**Testing without a real CLI**: A `fake` backend (deterministic, no network call) exists for
+all unit and integration tests. Run `python -m pytest -q` to exercise the full stack through
+the production dispatch path with the `fake` backend, proving that timeouts, crashes, and
+recovery all work without depending on a real agent CLI or network.
+
 ## Architecture at a glance
 
 ```

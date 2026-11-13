@@ -1,0 +1,2 @@
+{"run": 1, "backend": "fake", "model": null, "killed_mid_turn": false, "latency_s": 1.02, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}
+{"run": 2, "backend": "fake", "model": null, "killed_mid_turn": true, "latency_s": 1.34, "converged": true, "version_count": 2, "orphan_workers_remaining": 0, "ok": true}

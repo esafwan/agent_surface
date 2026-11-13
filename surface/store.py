@@ -100,6 +100,7 @@ class Store:
             res["meta"] = json.loads(res["meta_json"])
         else:
             res["meta"] = {}
+        res["freshness"] = self.compute_freshness(artifact_id)
         return res
 
     def list_artifacts(
@@ -123,6 +124,7 @@ class Store:
             res = dict(r)
             res["locked"] = bool(res["locked"])
             res["meta"] = json.loads(res["meta_json"]) if res.get("meta_json") else {}
+            res["freshness"] = self.compute_freshness(res["id"])
             result.append(res)
         return result
 
@@ -164,46 +166,114 @@ class Store:
         note: Optional[str] = None,
         source_event_id: Optional[str] = None,
         select: bool = True,
+        inputs: Optional[Dict[str, str]] = None,
+        expected_selected_version_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Create a new version for an artifact.
+
+        `inputs`, if given, is an explicit `{upstream_artifact_id:
+        upstream_version_id}` mapping declaring exactly what upstream
+        versions this new version was built from; it is written verbatim to
+        `version_inputs` and used later by `compute_freshness`. Passing an
+        explicit `inputs` (even one captured earlier, e.g. at job-dispatch
+        time and therefore already stale by the time this call lands) is
+        never overridden with "current" values -- that is the whole point:
+        it lets an async worker record what it actually saw, not what
+        happened to be selected when its result finally arrived.
+
+        When `inputs` is omitted, it is auto-captured from the *current*
+        `artifact_dependencies` graph: for every upstream of this artifact,
+        whatever that upstream's `selected_version_id` is right now is
+        recorded. This is the common synchronous-generation case.
+        """
         artifact = self.get_artifact(artifact_id)
         if not artifact:
             raise ValueError(f"Artifact {artifact_id} not found")
 
-        # Idempotency check: if source_event_id is provided, check if a version already exists for it
-        if source_event_id:
+        # Validate explicit inputs, if given. Auto-captured inputs (inputs is
+        # None) are always internally consistent since they're read straight
+        # from artifact_dependencies + current selected_version_id, so this
+        # only applies to the explicit-snapshot path.
+        if inputs is not None:
             cursor = self.conn.cursor()
-            cursor.execute(
-                "SELECT * FROM versions WHERE artifact_id = ? AND source_event_id = ?",
-                (artifact_id, source_event_id),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                ver_dict = dict(existing)
-                # If selection is requested, ensure it's selected
-                stale_descendants = []
-                if select and artifact["selected_version_id"] != ver_dict["id"]:
-                    sel_res = self.select_version(artifact_id, ver_dict["id"])
-                    stale_descendants = sel_res.get("stale_descendants", [])
-                return {
-                    "ok": True,
-                    "version_id": ver_dict["id"],
-                    "version": ver_dict["n"],
-                    "stale_descendants": stale_descendants,
-                }
+            for up_artifact_id, up_version_id in inputs.items():
+                up_artifact = self.get_artifact(up_artifact_id)
+                if not up_artifact:
+                    raise ValueError(
+                        f"inputs: upstream artifact {up_artifact_id!r} does not exist"
+                    )
+                up_version = self.get_version(up_version_id)
+                if not up_version or up_version["artifact_id"] != up_artifact_id:
+                    raise ValueError(
+                        f"inputs: upstream version {up_version_id!r} does not exist or "
+                        f"does not belong to artifact {up_artifact_id!r}"
+                    )
+                cursor.execute(
+                    "SELECT 1 FROM artifact_dependencies WHERE upstream_artifact_id = ? AND downstream_artifact_id = ?",
+                    (up_artifact_id, artifact_id),
+                )
+                if not cursor.fetchone():
+                    raise ValueError(
+                        f"inputs: {up_artifact_id!r} is not a declared dependency of "
+                        f"artifact {artifact_id!r}"
+                    )
 
-        # Determine next version number n
+        # The idempotency check (does a version for this source_event_id
+        # already exist?) and computing the next version number `n` are both
+        # check-then-write: a Python-level SELECT followed, several lines
+        # later, by an INSERT. Like select_version's conflict check (see its
+        # comment), that is only atomic within this one process's lock -- a
+        # second OS process (CLI vs board server, two worker subprocesses)
+        # can interleave between the SELECT and the INSERT here. Both races
+        # are real:
+        #   - two processes both read MAX(n)=k and both try to INSERT n=k+1,
+        #     the loser hitting the UNIQUE(artifact_id, n) constraint;
+        #   - the same event delivered to two workers both find no existing
+        #     row for source_event_id and both insert a version for it.
+        # BEGIN IMMEDIATE grabs SQLite's write lock before either read runs,
+        # so a concurrent writer blocks (then retries its own read-after-
+        # lock, so it correctly sees the loser's committed row) instead of
+        # silently racing past it.
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT MAX(n) FROM versions WHERE artifact_id = ?", (artifact_id,)
-        )
-        max_n = cursor.fetchone()[0]
-        next_n = (max_n or 0) + 1
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if source_event_id:
+                cursor.execute(
+                    "SELECT * FROM versions WHERE artifact_id = ? AND source_event_id = ?",
+                    (artifact_id, source_event_id),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    self.conn.commit()
+                    ver_dict = dict(existing)
+                    # If selection is requested, ensure it's selected
+                    stale_descendants = []
+                    if select and artifact["selected_version_id"] != ver_dict["id"]:
+                        sel_res = self.select_version(
+                            artifact_id, ver_dict["id"],
+                            expected_selected_version_id=expected_selected_version_id,
+                        )
+                        if not sel_res.get("ok", True):
+                            return sel_res
+                        stale_descendants = sel_res.get("stale_descendants", [])
+                    return {
+                        "ok": True,
+                        "version_id": ver_dict["id"],
+                        "version": ver_dict["n"],
+                        "stale_descendants": stale_descendants,
+                    }
 
-        version_id = f"ver_{uuid.uuid4().hex[:8]}"
-        params_json = json.dumps(params) if params is not None else None
-        now = _now_iso()
+            # Determine next version number n
+            cursor.execute(
+                "SELECT MAX(n) FROM versions WHERE artifact_id = ?", (artifact_id,)
+            )
+            max_n = cursor.fetchone()[0]
+            next_n = (max_n or 0) + 1
 
-        with self.conn:
+            version_id = f"ver_{uuid.uuid4().hex[:8]}"
+            params_json = json.dumps(params) if params is not None else None
+            now = _now_iso()
+
             self.conn.execute(
                 """
                 INSERT INTO versions (id, artifact_id, n, content_ref, content_type, content, prompt, params_json, created_by, note, source_event_id, created_at)
@@ -225,9 +295,63 @@ class Store:
                 ),
             )
 
+            # Record provenance for this version -- who it was built from.
+            if inputs is not None:
+                input_rows = dict(inputs)
+            else:
+                cursor.execute(
+                    "SELECT upstream_artifact_id FROM artifact_dependencies WHERE downstream_artifact_id = ?",
+                    (artifact_id,),
+                )
+                dep_rows = cursor.fetchall()
+                input_rows = {}
+                for dep_row in dep_rows:
+                    up_id = dep_row[0]
+                    cursor.execute(
+                        "SELECT selected_version_id FROM artifacts WHERE id = ?", (up_id,)
+                    )
+                    up_row = cursor.fetchone()
+                    if up_row and up_row[0]:
+                        input_rows[up_id] = up_row[0]
+
+            for up_artifact_id, up_version_id in input_rows.items():
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO version_inputs (version_id, upstream_artifact_id, upstream_version_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (version_id, up_artifact_id, up_version_id, now),
+                )
+
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            # Lost the (artifact_id, n) or source_event_id race despite
+            # BEGIN IMMEDIATE -- shouldn't happen given the write lock is
+            # held for the whole check-then-write, but if it ever does,
+            # roll back and surface a clear conflict rather than a raw
+            # constraint-violation traceback.
+            self.conn.rollback()
+            return {"ok": False, "error": "conflict", "detail": "version write race"}
+        except Exception:
+            self.conn.rollback()
+            raise
+
         stale_descendants = []
         if select:
-            sel_res = self.select_version(artifact_id, version_id)
+            sel_res = self.select_version(
+                artifact_id, version_id,
+                expected_selected_version_id=expected_selected_version_id,
+            )
+            if not sel_res.get("ok", True):
+                # The version itself was already created and committed above;
+                # only the "make it current" step lost the race. Report the
+                # conflict; the version exists and the caller can retry the
+                # selection (or accept the version un-selected) rather than
+                # having a create call silently discard a concurrent
+                # revision.
+                sel_res["version_id"] = version_id
+                sel_res["version"] = next_n
+                return sel_res
             stale_descendants = sel_res.get("stale_descendants", [])
 
         return {
@@ -278,24 +402,50 @@ class Store:
         if not version or version["artifact_id"] != artifact_id:
             raise ValueError(f"Version {version_id} invalid for artifact {artifact_id}")
 
-        if expected_selected_version_id is not None:
-            if artifact["selected_version_id"] != expected_selected_version_id:
-                return {
-                    "ok": False,
-                    "error": "conflict",
-                    "current_selected_version_id": artifact["selected_version_id"],
-                }
-
-        # Check if selected_version_id is actually changing
         old_selected = artifact["selected_version_id"]
         now = _now_iso()
 
+        # The conflict check and the write must be one atomic statement, not a
+        # Python-level read (get_artifact above) followed by a separate write.
+        # Two separate statements are only safe within a single Python-level
+        # critical section (this class's @_synchronized lock, which only
+        # guards this one process); a second OS process (the CLI and the
+        # board server are separate processes sharing one sqlite file) can
+        # write between the read and the write here, and the second writer's
+        # UPDATE would silently overwrite the first with no error. Folding
+        # the check into the UPDATE's WHERE clause makes SQLite's own
+        # cross-connection write serialization do the atomicity, not our
+        # Python code.
         stale_descendants = []
         with self.conn:
-            self.conn.execute(
-                "UPDATE artifacts SET selected_version_id = ?, updated_at = ? WHERE id = ?",
-                (version_id, now, artifact_id),
-            )
+            if expected_selected_version_id is not None:
+                # NULL can't be compared with '=', so branch on IS vs = ?.
+                if expected_selected_version_id == "":
+                    where_clause = "id = ? AND selected_version_id IS NULL"
+                    params: tuple = (artifact_id,)
+                else:
+                    where_clause = "id = ? AND selected_version_id = ?"
+                    params = (artifact_id, expected_selected_version_id)
+                cursor = self.conn.execute(
+                    f"UPDATE artifacts SET selected_version_id = ?, updated_at = ? WHERE {where_clause}",
+                    (version_id, now, *params),
+                )
+                if cursor.rowcount == 0:
+                    # Either the artifact vanished (already checked above,
+                    # so not that) or selected_version_id no longer matches
+                    # what the caller expected -- re-read to report the
+                    # actual current value to the caller.
+                    current = self.get_artifact(artifact_id)
+                    return {
+                        "ok": False,
+                        "error": "conflict",
+                        "current_selected_version_id": current["selected_version_id"] if current else None,
+                    }
+            else:
+                self.conn.execute(
+                    "UPDATE artifacts SET selected_version_id = ?, updated_at = ? WHERE id = ?",
+                    (version_id, now, artifact_id),
+                )
 
             # If selected version changed, trigger DAG stale propagation
             if old_selected != version_id:
@@ -382,8 +532,18 @@ class Store:
 
     def _propagate_stale(self, start_artifact_id: str) -> List[str]:
         """
-        Recursively traverse downstream dependent artifacts, mark them as 'stale',
-        and emit 'stale' system events for affected artifacts.
+        Recursively traverse downstream dependent artifacts and emit 'stale'
+        system events for affected artifacts, notifying that something
+        upstream changed.
+
+        This does NOT mutate any artifact's `status` column -- lifecycle
+        status (draft/in_review/approved/...) is a human/worker decision and
+        is never touched by staleness propagation. Whether an artifact is
+        actually stale is a computed fact, derived on read by
+        `compute_freshness` from `version_inputs`, not stored here. This
+        method only fans out a notification so downstream consumers (e.g. a
+        worker that wants to re-run) know something upstream moved.
+
         Revisited artifacts are avoided using a visited set.
         """
         cursor = self.conn.cursor()
@@ -409,11 +569,6 @@ class Store:
         now = _now_iso()
         stale_marked = []
         for down_id in descendants:
-            # Mark artifact as stale
-            cursor.execute(
-                "UPDATE artifacts SET status = 'stale', updated_at = ? WHERE id = ?",
-                (now, down_id),
-            )
             stale_marked.append(down_id)
 
             # Emit stale system event if not already emitted for this down_id
@@ -433,6 +588,129 @@ class Store:
                 )
 
         return stale_marked
+
+    def compute_freshness(
+        self, artifact_id: str, _cache: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Read-only, computed-on-every-call freshness check.
+
+        An artifact is fresh iff, for every CURRENT real dependency it has
+        (`artifact_dependencies` naming it as downstream) -- not merely
+        whatever happens to be recorded in `version_inputs` -- there is a
+        `version_inputs` row for that upstream on the selected version, that
+        row's recorded upstream version id still matches the upstream's
+        *current* `selected_version_id`, AND that upstream artifact is
+        itself fresh (transitive staleness). A real dependency with NO
+        `version_inputs` row at all (missing provenance -- e.g. the version
+        predates input capture, or was created with `inputs={}`) is treated
+        as NOT fresh: "no record" is never silently read as "known fresh".
+        An artifact with no current dependencies has nothing to be stale
+        against and stays fresh.
+
+        Nothing here is stored or cached; it is purely derived from
+        `artifact_dependencies` + `version_inputs` + `selected_version_id`
+        at call time, so reverting an upstream selection back to a recorded
+        version id makes downstream fresh again with no extra bookkeeping.
+
+        `stale_because` is a list of `{"upstream_artifact_id": ..., "reason":
+        "changed" | "no_record"}` dicts -- `"changed"` means a
+        `version_inputs` row exists but no longer matches (directly or
+        transitively); `"no_record"` means no `version_inputs` row exists
+        for a real current dependency at all.
+
+        `_cache` memoizes each artifact's result within one top-level call --
+        both so two sibling branches that share an ancestor (A depends on B
+        and C, both depend on D) each see D's real computed result instead
+        of the second visitor treating an in-progress/already-seen node as
+        trivially fresh, and as a defensive guard against runaway recursion
+        if a cycle ever slipped past `add_dependency`'s edge-level cycle
+        check. A node still being evaluated higher up the call chain (a true
+        cycle) is reported fresh for that one recursive edge only, to break
+        the loop -- it is not cached, so a later sibling re-evaluates it
+        properly.
+        """
+        if _cache is None:
+            _cache = {}
+        if artifact_id in _cache:
+            cached = _cache[artifact_id]
+            if cached is None:
+                # A true cycle: this artifact is still being evaluated higher
+                # up this same call chain. Report fresh for this one
+                # recursive edge only (not cached) so the loop terminates,
+                # without poisoning the real result for this artifact.
+                return {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            return cached
+        _cache[artifact_id] = None  # mark in-progress for cycle detection
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT selected_version_id FROM artifacts WHERE id = ?", (artifact_id,)
+        )
+        row = cursor.fetchone()
+        if not row or not row["selected_version_id"]:
+            result = {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            _cache[artifact_id] = result
+            return result
+
+        selected_version_id = row["selected_version_id"]
+
+        # Current real dependency edges -- the source of truth for what
+        # SHOULD have a provenance record, independent of what actually got
+        # recorded in version_inputs.
+        cursor.execute(
+            "SELECT upstream_artifact_id FROM artifact_dependencies WHERE downstream_artifact_id = ?",
+            (artifact_id,),
+        )
+        current_upstream_ids = [r["upstream_artifact_id"] for r in cursor.fetchall()]
+
+        if not current_upstream_ids:
+            result = {"artifact_id": artifact_id, "fresh": True, "stale_because": []}
+            _cache[artifact_id] = result
+            return result
+
+        cursor.execute(
+            "SELECT upstream_artifact_id, upstream_version_id FROM version_inputs WHERE version_id = ?",
+            (selected_version_id,),
+        )
+        recorded = {
+            r["upstream_artifact_id"]: r["upstream_version_id"]
+            for r in cursor.fetchall()
+        }
+
+        stale_because: List[Dict[str, str]] = []
+        for up_artifact_id in current_upstream_ids:
+            if up_artifact_id not in recorded:
+                # Real dependency, but no provenance record for it at all --
+                # this is Gap 1: missing record must not read as fresh.
+                stale_because.append(
+                    {"upstream_artifact_id": up_artifact_id, "reason": "no_record"}
+                )
+                continue
+
+            recorded_upstream_version_id = recorded[up_artifact_id]
+
+            cursor.execute(
+                "SELECT selected_version_id FROM artifacts WHERE id = ?",
+                (up_artifact_id,),
+            )
+            up_row = cursor.fetchone()
+            current_upstream_version_id = up_row["selected_version_id"] if up_row else None
+
+            direct_stale = current_upstream_version_id != recorded_upstream_version_id
+            upstream_freshness = self.compute_freshness(up_artifact_id, _cache=_cache)
+
+            if direct_stale or not upstream_freshness["fresh"]:
+                stale_because.append(
+                    {"upstream_artifact_id": up_artifact_id, "reason": "changed"}
+                )
+
+        result = {
+            "artifact_id": artifact_id,
+            "fresh": len(stale_because) == 0,
+            "stale_because": stale_because,
+        }
+        _cache[artifact_id] = result
+        return result
 
     # -------------------------------------------------------------------------
     # Event Inbox

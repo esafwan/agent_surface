@@ -209,7 +209,7 @@ class Supervisor:
                 "draft": len([a for a in stage_artifacts if a["status"] == "draft"]),
                 "review": len([a for a in stage_artifacts if a["status"] == "review"]),
                 "approved": len([a for a in stage_artifacts if a["status"] == "approved"]),
-                "stale": len([a for a in stage_artifacts if a["status"] == "stale"]),
+                "stale": len([a for a in stage_artifacts if not a["freshness"]["fresh"]]),
                 "generating": len([a for a in stage_artifacts if a["status"] == "generating"]),
             }
 

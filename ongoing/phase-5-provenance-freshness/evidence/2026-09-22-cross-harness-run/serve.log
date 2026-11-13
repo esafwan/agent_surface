@@ -1,0 +1,3 @@
+__main__: INFO: Board listening on http://127.0.0.1:7920 (basic auth user 'surface')
+__main__: INFO: Starting supervisor loop (until interrupted)...
+surface.supervisor: INFO: Worker started: session_46b5d462b484
