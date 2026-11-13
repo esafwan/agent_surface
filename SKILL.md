@@ -23,6 +23,73 @@ Keep in chat when:
 
 ---
 
+## Planning a New Surface (do this before writing any config)
+
+Before creating a stage config, work through these questions **in order**. Do not
+skip to "which `board_view`" before answering 1-4 — the view type is a
+consequence of the answers, not an independent choice.
+
+1. **What is the unit of work?** Name the actual artifacts (one sentence
+   each): "a script", "a slide", "a todo item", "a rendered frame + its
+   source image". If you can't name a short, concrete noun, the task is
+   probably still chat-shaped, not board-shaped — recheck "When to Open
+   the Board" above before continuing.
+
+2. **What depends on what?** Draw the DAG in your head, or on paper, as
+   `parent -> child`: script -> shots -> images -> videos; or a flat set
+   with no edges (a todo list has none). No edges is fine and common —
+   don't invent fake dependencies to feel thorough.
+
+3. **Is this a pipeline or a conversation?**
+   - A pipeline (user moves forward through distinct stages, each with its
+     own artifact kind) -> stage tabs, the board as documented below.
+   - A back-and-forth exchange (ask -> answer -> refine -> approve on the
+     *same* artifact) -> one stage, one artifact, revised in place
+     (see "Match Stage Shape to the Work"), or the **Synchronous
+     Alternative** section if there's no natural pause for async work.
+   Getting this wrong produces the single most common bad surface: N tabs
+   of near-identical Submit/Approve pairs for what was really one
+   conversation.
+
+4. **What does the user need to see to decide, per artifact kind?**
+   For each kind from step 1, name the one or two things a human must look
+   at to approve/reject/pick: raw text, a rendered image, a video with its
+   source frame beside it, a diff against the previous version, a list of
+   checkboxes, a progress count. This determines the **item renderer**
+   (how one artifact displays), independent of how artifacts are collected
+   together.
+
+5. **How does the user want to scan many of them at once?**
+   Separately from step 4, pick the **collection view**: a flat list (small
+   number, order matters), grouped columns by status (kanban-shaped
+   triage), or a grid (mostly visual items — images, video thumbnails,
+   slides). These two axes — item renderer and collection view — are
+   independent; don't let "it's visual" force a collection choice before
+   checking if the real need is "I need to compare two versions
+   side-by-side" (item renderer), not "I need a grid" (collection view).
+
+6. **What actions change state, and do any need a worker?**
+   List them against the two buckets in "Board UI Best Practices" below:
+   Safe Actions (select/approve/lock — no worker, instant) vs Actions
+   Requiring Worker (edit/revise/regenerate/message/cancel — create an
+   event, worker picks it up). If most of the work is actions a human
+   does with no agent round-trip (a plain todo list, a checklist), you may
+   not need a worker running at all — say so explicitly rather than
+   defaulting to the full worker+poller setup.
+
+7. **Write the stage config last**, once 1-6 have concrete one-line
+   answers. If you can't answer one, that's the actual open design
+   question — resolve it before generating JSON, don't paper over it with
+   a default.
+
+If you are a smaller/cheaper model asked to do this and you're unsure on
+step 3 or 5, say which answer you're unsure of and why, rather than
+guessing silently — a wrong collection-view choice is cheap to fix later;
+a wrong pipeline-vs-conversation choice usually means redoing the stage
+config from scratch.
+
+---
+
 ## Project Lifecycle
 
 ### Initialize a Project
