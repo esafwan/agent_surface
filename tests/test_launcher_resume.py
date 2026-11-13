@@ -1,8 +1,10 @@
 """Tests for surface/launcher.py ("surface resume")."""
 
+import fcntl
 import json
 import os
 import socket
+import threading
 
 import pytest
 
@@ -177,3 +179,110 @@ class TestResume:
         assert captured["agent"] == "fake"
         assert captured["agent_timeout"] == 45
         assert captured["db"] == str(db_path)
+
+    def test_resume_lock_held_across_serve_prevents_second_concurrent_start(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression test for the resume-lock race.
+
+        `_resume_lock` must stay held for the *entire* `serve()` call, not
+        just the detect-and-decide step before it -- otherwise a second
+        concurrent `resume()` can slip in while the first is still
+        starting up (before its port/pid/token files are genuinely live)
+        and kick off a second `serve()` on the same DB.
+
+        This simulates that race deterministically: the stubbed `serve()`
+        signals an "I've started" event and then blocks on a second event
+        until released. While it's blocked, the test thread tries to grab
+        `resume.lock` itself with a non-blocking `flock` -- if the
+        production code releases the resume lock before calling `serve()`
+        (the bug), that non-blocking acquire succeeds; if the lock is
+        correctly held across `serve()`, it raises `OSError`. The key
+        behavioral assertion is that the stubbed `serve()` is invoked at
+        most once across both concurrent `resume()` calls.
+        """
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+        })
+        store.conn.close()
+
+        serve_started = threading.Event()
+        serve_release = threading.Event()
+        call_count = {"n": 0}
+        lock_held_while_serving = {"value": None}
+
+        def _fake_serve(self, **kwargs):
+            call_count["n"] += 1
+            serve_started.set()
+            serve_release.wait(timeout=5)
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        results = []
+
+        def _run_resume():
+            results.append(resume(tmp_path))
+
+        t1 = threading.Thread(target=_run_resume)
+        t1.start()
+
+        assert serve_started.wait(timeout=5), "serve() was never invoked"
+
+        # While the first resume()'s serve() is "running", the resume lock
+        # must still be held -- confirm it from the test thread with an
+        # independent non-blocking flock attempt.
+        run_dir = db_path.parent / "run"
+        lock_path = run_dir / "resume.lock"
+        probe_fd = open(lock_path, "w")
+        try:
+            try:
+                fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_held_while_serving["value"] = False
+                fcntl.flock(probe_fd, fcntl.LOCK_UN)
+            except OSError:
+                lock_held_while_serving["value"] = True
+        finally:
+            probe_fd.close()
+
+        # Fire a second concurrent resume() while the first is still
+        # genuinely mid-serve (its serve() hasn't been released yet). It
+        # must not start a second serve() -- it should either block on
+        # the lock until it times out and backs off cleanly, or detect
+        # the lock is held. Crucially, serve() must stay invoked exactly
+        # once while the first resume() is still serving.
+        t2 = threading.Thread(target=_run_resume)
+        t2.start()
+        # Let t2 run its full lock-wait-and-back-off cycle while t1's
+        # serve() is still blocked (not yet released).
+        t2.join(timeout=5)
+
+        assert lock_held_while_serving["value"] is True, (
+            "resume lock was released before serve() completed -- the race "
+            "the lock is supposed to prevent"
+        )
+        assert call_count["n"] == 1, (
+            f"serve() was invoked {call_count['n']} times while the first "
+            "resume() was still serving; expected exactly 1"
+        )
+
+        serve_release.set()
+        t1.join(timeout=5)
+
+        assert call_count["n"] == 1, (
+            f"serve() was invoked {call_count['n']} times in total; expected exactly 1"
+        )

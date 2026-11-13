@@ -390,19 +390,29 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
         finally:
             store.conn.close()
 
-    # Lock released (the `with` block above has exited). serve() blocks /
-    # runs the loop, so it must not hold the resume lock.
-    from surface.cli import SurfaceCLI  # local import: avoid any import cycle
+        # Keep the resume lock held across the entire serve() call -- not
+        # just the detect-and-decide step above. serve() does real work
+        # (reserving a port, writing token/port/pid files, starting the
+        # board thread) before the port actually accepts connections; if
+        # the lock were released here, a second concurrent `resume()`
+        # could acquire it, call `detect_live_runtime()` (which would
+        # still return None because this serve() hasn't finished binding
+        # yet), and start a second supervisor on the same DB. An
+        # `fcntl.flock` is released automatically when this process exits
+        # or the fd closes, so holding it for the server's lifetime is
+        # safe -- a background/supervisor process holding a lock on its
+        # own run-dir for its whole lifetime is the normal pattern here.
+        from surface.cli import SurfaceCLI  # local import: avoid any import cycle
 
-    cli = SurfaceCLI(db_path=str(db_path))
-    cli.serve(
-        db=str(db_path),
-        stage=profile.get("stage") or "movie",
-        agent=profile.get("agent"),
-        agent_model=profile.get("agent_model"),
-        agent_timeout=profile.get("agent_timeout"),
-    )
-    return 0
+        cli = SurfaceCLI(db_path=str(db_path))
+        cli.serve(
+            db=str(db_path),
+            stage=profile.get("stage") or "movie",
+            agent=profile.get("agent"),
+            agent_model=profile.get("agent_model"),
+            agent_timeout=profile.get("agent_timeout"),
+        )
+        return 0
 
 
 def render_command_script(fallback_bin: str) -> str:
@@ -415,7 +425,18 @@ def render_command_script(fallback_bin: str) -> str:
     """
     template_path = Path(__file__).parent / "templates" / "launcher.command"
     text = template_path.read_text(encoding="utf-8")
-    return Template(text).substitute(fallback_bin=fallback_bin)
+    # Escape shell-meaningful characters so a fallback_bin containing them
+    # can't break the generated script's syntax or trigger unwanted
+    # expansion inside the double-quoted `BIN="$fallback_bin"` assignment.
+    # Order matters: backslash must be escaped first, or the backslashes
+    # inserted by the later replacements would themselves get doubled.
+    escaped_fallback_bin = (
+        fallback_bin.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+    return Template(text).substitute(fallback_bin=escaped_fallback_bin)
 
 
 def _resolve_fallback_bin() -> str:
@@ -428,9 +449,13 @@ def _resolve_fallback_bin() -> str:
       2. `Path(sys.argv[0]).resolve()` -- when `surface` isn't on PATH
          right now but this process was clearly invoked as that script
          (argv[0] ends with "surface"), trust how it was actually invoked.
-      3. `sys.executable -m surface.cli` -- last-resort fallback so the
-         template always has *something* runnable, even if neither of the
-         above panned out (e.g. invoked via `python -m`).
+
+    Returns "" (never a multi-word string) when neither panned out --
+    the rendered `.command` template's `[ ! -x "$BIN" ]` check and
+    `"$BIN" resume .` invocation both require a single executable PATH,
+    so there is no usable single-word fallback left to offer. The
+    template handles an empty fallback by printing a clear error instead
+    of trying to exec something broken.
     """
     which = shutil.which("surface")
     if which:
@@ -442,7 +467,7 @@ def _resolve_fallback_bin() -> str:
         if resolved.exists():
             return str(resolved)
 
-    return f"{sys.executable} -m surface.cli"
+    return ""
 
 
 def write_command_script(project_dir: Path, force: bool = False) -> Path:

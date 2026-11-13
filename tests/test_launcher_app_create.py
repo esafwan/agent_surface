@@ -33,6 +33,21 @@ def test_rendered_script_has_valid_shell_syntax(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_render_command_script_escapes_double_quote_in_fallback_bin(tmp_path):
+    # A fallback_bin containing a double quote must not break the
+    # generated script's shell syntax (the template substitutes it into
+    # a double-quoted `BIN="$fallback_bin"` assignment).
+    malicious = '/usr/local/bin/sur"face'
+    script = render_command_script(malicious)
+    script_path = tmp_path / "rendered.command"
+    script_path.write_text(script, encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-n", str(script_path)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_write_command_script_creates_executable_file(tmp_path):
     written = write_command_script(tmp_path)
 
