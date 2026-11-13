@@ -65,6 +65,28 @@ path later shows you exactly where you left off.
 To actually have an agent write and revise content for you (rather than just hosting a blank
 board), add `--agent <name>` when you `serve` — see "Real agent backends" below.
 
+### Example surfaces
+
+The architecture below is one skeleton — board + store + supervisor + worker — with the
+*worker* and *stage config* swapped out per app. Two concrete examples built on it:
+
+- **Haiku board** (a minimal example) — a one-box app: type a topic, click Generate, and the
+  worker calls an LLM to write a fresh haiku, shown on a yellow sticky note. Each generate is
+  an immutable version, so you can look back at every haiku ever written in that session — the
+  "undo history" is free, it's just the version table.
+- **Migration surface** (a real-world example) — a data-migration console for moving rows from
+  one dataset to another. The left column lists source rows (matched/unmatched), the middle
+  panel compares a matched pair field-by-field with price deltas and an editable "final" column,
+  and the right column shows the live target dataset plus a running report (rows, matched,
+  migrated, unmatched counts). Clicking "Migrate" writes a new version of the target dataset, so
+  the version history doubles as a full audit trail of every migration decision.
+
+Both are the same pattern: the board is a thin, deterministic renderer over the SQLite store
+(it never holds state itself — clicks become inbox events, polling shows fresh state); a
+Supervisor claims events and dispatches them to a worker; the worker is the only part that's
+actually different between the two apps (haiku-writing vs. row-matching), and plugs in via the
+same stage-config + worker contract described in "Writing a new stage config" below.
+
 ---
 
 ## For programmers
