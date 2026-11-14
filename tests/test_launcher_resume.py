@@ -660,24 +660,39 @@ class TestResumeAuthHint:
 class TestFindChromiumBinary:
     def test_detection_order_respected(self, monkeypatch, tmp_path):
         chrome_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        arc_path = Path("/Applications/Arc.app/Contents/MacOS/Arc")
+        dia_path = Path("/Applications/Dia.app/Contents/MacOS/Dia")
         edge_path = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
         brave_path = Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
         checked = []
 
         def _fake_exists(path):
             checked.append(str(path))
-            # Only the Brave path (checked third) exists -- confirm Chrome
-            # and Edge were checked first and both returned False.
+            # Only the Brave path (checked last of these) exists -- confirm
+            # Chrome, Arc, Dia and Edge were checked first and all returned False.
             return str(path) == str(brave_path)
 
         monkeypatch.setattr(os.path, "exists", _fake_exists)
 
         result = find_chromium_binary()
         assert result == str(brave_path)
-        assert str(chrome_path) in checked
-        assert str(edge_path) in checked
-        assert checked.index(str(chrome_path)) < checked.index(str(brave_path))
-        assert checked.index(str(edge_path)) < checked.index(str(brave_path))
+        for earlier in (chrome_path, arc_path, dia_path, edge_path):
+            assert str(earlier) in checked
+            assert checked.index(str(earlier)) < checked.index(str(brave_path))
+        # Arc and Dia sit between Chrome and Edge in the preference order.
+        assert checked.index(str(chrome_path)) < checked.index(str(arc_path))
+        assert checked.index(str(arc_path)) < checked.index(str(dia_path))
+        assert checked.index(str(dia_path)) < checked.index(str(edge_path))
+
+    def test_arc_and_dia_detected_in_user_applications(self, monkeypatch):
+        home_apps = Path.home() / "Applications"
+        dia_path = home_apps / "Dia.app/Contents/MacOS/Dia"
+        monkeypatch.setattr(os.path, "exists", lambda path: str(path) == str(dia_path))
+        assert find_chromium_binary() == str(dia_path)
+
+        arc_path = home_apps / "Arc.app/Contents/MacOS/Arc"
+        monkeypatch.setattr(os.path, "exists", lambda path: str(path) == str(arc_path))
+        assert find_chromium_binary() == str(arc_path)
 
     def test_helium_found_after_chromium_before_which_fallback(self, monkeypatch):
         chrome_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -703,7 +718,9 @@ class TestFindChromiumBinary:
 
         result = find_chromium_binary()
         assert result == str(helium_path)
-        for earlier in (chrome_path, edge_path, brave_path, chromium_path):
+        arc_path = Path("/Applications/Arc.app/Contents/MacOS/Arc")
+        dia_path = Path("/Applications/Dia.app/Contents/MacOS/Dia")
+        for earlier in (chrome_path, arc_path, dia_path, edge_path, brave_path, chromium_path):
             assert str(earlier) in checked
             assert checked.index(str(earlier)) < checked.index(str(helium_path))
         # shutil.which fallback should never have been reached.

@@ -297,6 +297,8 @@ def find_chromium_binary() -> Optional[str]:
     """
     candidates = [
         "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Arc.app/Contents/MacOS/Arc",
+        "Dia.app/Contents/MacOS/Dia",
         "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         "Brave Browser.app/Contents/MacOS/Brave Browser",
         "Chromium.app/Contents/MacOS/Chromium",
