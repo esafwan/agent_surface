@@ -9,6 +9,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -937,6 +938,155 @@ class TestServeRuntime:
             "/api/state", headers={"Authorization": header}
         ).status_code == 200
 
+    def test_serve_nonloopback_host_forces_auth_on(
+        self, serve_project, monkeypatch, capsys, caplog
+    ):
+        """`--host 0.0.0.0` with no `--auth` must not serve unauthenticated:
+        the forcing guard turns auth on and warns loudly."""
+        pytest.importorskip("fastapi")
+        cli, db_path = serve_project
+
+        from fastapi.testclient import TestClient
+
+        built = {}
+
+        def _fake_app(store, cfg, token):
+            built["token"] = token
+            from surface.board_web import create_app
+            return create_app(store, cfg, token=token)
+
+        monkeypatch.setattr(cli, "_build_board_app", _fake_app)
+        launched = {}
+        monkeypatch.setattr(
+            "uvicorn.run", lambda app, **kwargs: launched.setdefault("app", app)
+        )
+
+        with caplog.at_level("WARNING"):
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=True,
+                host="0.0.0.0",
+                worker_command=ECHO_WORKER_COMMAND,
+                keep_runtime_files=True,
+            )
+        capsys.readouterr()
+
+        assert built["token"], "auth should have been forced on"
+        assert "not loopback-only" in caplog.text
+        assert "forcing" in caplog.text.lower()
+
+        client = TestClient(launched["app"])
+        assert client.get("/api/state").status_code == 401
+
+        import base64
+        header = "Basic " + base64.b64encode(
+            f"surface:{built['token']}".encode()
+        ).decode()
+        assert client.get(
+            "/api/state", headers={"Authorization": header}
+        ).status_code == 200
+
+    def test_serve_nonloopback_host_with_explicit_auth_no_warning(
+        self, serve_project, monkeypatch, capsys, caplog
+    ):
+        """`--host 0.0.0.0 --auth`: auth is on (as requested), but since the
+        user already asked for it explicitly there is nothing to warn
+        about -- the forcing warning should not print."""
+        pytest.importorskip("fastapi")
+        cli, db_path = serve_project
+
+        built = {}
+
+        def _fake_app(store, cfg, token):
+            built["token"] = token
+            from surface.board_web import create_app
+            return create_app(store, cfg, token=token)
+
+        monkeypatch.setattr(cli, "_build_board_app", _fake_app)
+        monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+
+        with caplog.at_level("WARNING"):
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=True,
+                host="0.0.0.0",
+                worker_command=ECHO_WORKER_COMMAND,
+                keep_runtime_files=True,
+                require_auth=True,
+            )
+        capsys.readouterr()
+
+        assert built["token"]
+        assert "not loopback-only" not in caplog.text
+
+    def test_serve_loopback_ip_host_unaffected(self, serve_project, capsys, caplog):
+        """`--host 127.0.0.1` (no `--auth`) is unaffected: auth stays off,
+        and no forcing warning is printed."""
+        cli, db_path = serve_project
+
+        with caplog.at_level("WARNING"):
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=False,
+                host="127.0.0.1",
+                worker_command=ECHO_WORKER_COMMAND,
+                keep_runtime_files=True,
+            )
+        capsys.readouterr()
+
+        assert cli.runtime_info["token"] is None
+        assert "not loopback-only" not in caplog.text
+
+    def test_serve_localhost_hostname_unaffected(self, serve_project, capsys, caplog):
+        """`--host localhost` (no `--auth`) behaves like 127.0.0.1: the
+        hostname-string loopback check must recognize it too, not just
+        literal IPs."""
+        cli, db_path = serve_project
+
+        with caplog.at_level("WARNING"):
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=False,
+                host="localhost",
+                worker_command=ECHO_WORKER_COMMAND,
+                keep_runtime_files=True,
+            )
+        capsys.readouterr()
+
+        assert cli.runtime_info["token"] is None
+        assert "not loopback-only" not in caplog.text
+
+    def test_serve_board_log_message_reflects_actual_host(
+        self, serve_project, monkeypatch, capsys, caplog
+    ):
+        """The "Board listening on..." log message must use the real host
+        passed to serve(), not a hardcoded string."""
+        pytest.importorskip("fastapi")
+        cli, db_path = serve_project
+
+        monkeypatch.setattr(
+            cli, "_build_board_app", lambda store, cfg, token: object()
+        )
+        monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: None)
+
+        with caplog.at_level("INFO"):
+            cli.serve(
+                db=db_path,
+                max_iterations=1,
+                board=True,
+                host="0.0.0.0",
+                worker_command=ECHO_WORKER_COMMAND,
+                keep_runtime_files=True,
+            )
+        capsys.readouterr()
+
+        assert "0.0.0.0" in caplog.text
+        assert "127.0.0.1 only" not in caplog.text
+
     def test_serve_max_iterations_bounds_the_loop(self, serve_project, capsys):
         cli, db_path = serve_project
         cli.serve(
@@ -1678,3 +1828,73 @@ class TestRenderWaitCommands:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "json" in captured.err.lower()
+
+
+class TestServeNoAuthFlag:
+    """`--no-auth` and `--auth`/`--no-auth` mutual exclusivity (argparse +
+    main() dispatch level, via subprocess against the real CLI entry
+    point)."""
+
+    def _run(self, *args, cwd):
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+        return subprocess.run(
+            [sys.executable, "-m", "surface.cli", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+    def test_auth_and_no_auth_together_is_a_clean_error(self, tmp_path):
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        init_result = self._run(
+            "--db", str(db_path), "init", "--stage", "movie", cwd=tmp_path
+        )
+        assert init_result.returncode == 0, init_result.stderr
+
+        result = self._run(
+            "--db", str(db_path), "serve",
+            "--max-iterations", "1", "--no-board",
+            "--auth", "--no-auth",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode != 0
+        assert "--auth and --no-auth are mutually exclusive" in result.stderr
+
+    def test_no_auth_flag_overrides_saved_profile_to_false(self, serve_project, capsys):
+        """`surface serve --auth` saves require_auth: True to the profile;
+        a later `surface serve --no-auth` call must override it back to
+        False for that invocation AND persist the override."""
+        cli, db_path = serve_project
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+            require_auth=True,
+        )
+        capsys.readouterr()
+        assert cli.runtime_info["token"] is not None
+
+        # Separate invocation, explicit --no-auth (require_auth=False).
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+            require_auth=False,
+        )
+        capsys.readouterr()
+        assert cli.runtime_info["token"] is None
+
+        from surface.launch_profile import load_profile
+        store = cli.get_store()
+        saved = load_profile(store.conn)
+        assert saved.get("require_auth") is False

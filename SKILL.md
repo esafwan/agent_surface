@@ -131,6 +131,10 @@ token). Note the token lives beside the **db**, so with `--db examples/x/state.s
 `examples/x/run/token`, not `.surface-board/run/token`. Without `--auth`, no token file is
 written at all. `surface resume` remembers the last `--auth` choice via the saved launch profile.
 
+**Upgrade note:** this off-by-default auth is a change from prior behavior, where Basic Auth was
+always on. Pass `--auth` to restore the old always-authenticated behavior, or `--no-auth` to force
+it off for one invocation. A non-loopback `--host` always forces auth back on regardless.
+
 ### Check Project Status
 
 ```bash

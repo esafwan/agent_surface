@@ -204,7 +204,7 @@ surface [--db PATH] serve [--run-once] [--max-iterations N] [--no-board]
                           [--keep-runtime-files] [--pool-size N]
                           [--recycle-after-events N] [--recycle-after-tokens N]
                           [--agent NAME] [--agent-model ID] [--agent-timeout SECONDS]
-                          [--auth]
+                          [--auth] [--no-auth]
 surface [--db PATH] stop
 surface [--db PATH] interrupt
 surface [--db PATH] recover [--force-reclaim]
@@ -239,6 +239,11 @@ to also require it, in which case each run gets a random auth token, written und
 dir (`--runtime-dir`), so there's never a fixed or guessable credential. Without `--auth` (the
 default), no token is generated or written at all. If fastapi/uvicorn aren't installed, `serve`
 logs that and runs headless.
+
+**Upgrade note:** prior to this no-auth default, Basic Auth was always on. If you relied on the
+old always-authenticated behavior, pass `--auth` explicitly (or use `--no-auth` to force it off
+for one invocation regardless of a saved profile). Binding `--host` to anything non-loopback
+always forces auth back on, even without `--auth`.
 
 ## Resuming a project (in progress)
 

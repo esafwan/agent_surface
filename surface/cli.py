@@ -10,6 +10,7 @@ Per SPEC section 17 (Store/Inbox Tools CLI) and section 9 (Runtime Directory).
 import argparse
 import importlib.util
 import inspect
+import ipaddress
 import json
 import logging
 import os
@@ -698,7 +699,7 @@ class SurfaceCLI:
         else:
             logger.info(
                 f"Board listening on http://{host}:{port} "
-                "(no authentication -- bound to 127.0.0.1 only)"
+                "(no authentication -- loopback bind only)"
             )
         return True
 
@@ -754,7 +755,7 @@ class SurfaceCLI:
         else:
             logger.info(
                 f"Board listening on http://{host}:{port} "
-                "(no authentication -- bound to 127.0.0.1 only)"
+                "(no authentication -- loopback bind only)"
             )
         return True
 
@@ -876,6 +877,33 @@ class SurfaceCLI:
             if effective_agent_timeout is None:
                 effective_agent_timeout = DEFAULT_AGENT_TIMEOUT
             effective_require_auth = bool(merged_profile.get("require_auth") or False)
+
+            # -----------------------------------------------------------------
+            # Host-forcing guard: the loopback bind is the real security
+            # boundary (see note above). If `host` is NOT loopback and auth
+            # is not already on, serving unauthenticated would expose a
+            # genuinely unauthenticated board to the network -- a new
+            # exposure, not part of the accepted loopback-only tradeoff.
+            # Force auth on rather than refusing to start (refusing would be
+            # a bigger behavior change and less helpful), unless the caller
+            # explicitly passed --auth already (nothing to warn about then).
+            # -----------------------------------------------------------------
+            def _is_loopback_host(h: str) -> bool:
+                if h.lower() == "localhost":
+                    return True
+                try:
+                    return ipaddress.ip_address(h).is_loopback
+                except ValueError:
+                    return False
+
+            if not _is_loopback_host(host) and not effective_require_auth:
+                logger.warning(
+                    f"WARNING: --host {host} is not loopback-only; forcing "
+                    "Basic Auth on regardless of --auth (unauthenticated "
+                    "boards must not be exposed to the network). Pass "
+                    "--auth explicitly to silence this warning."
+                )
+                effective_require_auth = True
 
             # -----------------------------------------------------------------
             # Runtime directory: token + port + pids (SPEC section 9)
@@ -1656,6 +1684,14 @@ def main():
              "security boundary; omitting this flag keeps whatever the "
              "saved launch profile says, defaulting to off)",
     )
+    serve_parser.add_argument(
+        "--no-auth", dest="no_auth", action="store_true", default=False,
+        help="Explicitly disable HTTP Basic Auth for this invocation, "
+             "overriding a saved launch profile that has require_auth: True "
+             "(mutually exclusive with --auth). Note: binding to a "
+             "non-loopback --host still forces auth on regardless of this "
+             "flag.",
+    )
 
     # =========================================================================
     # Recovery CLI (SPEC section 45, 40)
@@ -1821,6 +1857,12 @@ def main():
         cli.tui()
 
     elif args.command == "serve":
+        if args.require_auth and getattr(args, "no_auth", False):
+            print("--auth and --no-auth are mutually exclusive", file=sys.stderr)
+            sys.exit(1)
+        resolved_require_auth = args.require_auth
+        if getattr(args, "no_auth", False):
+            resolved_require_auth = False
         cli.serve(
             db=args.db,
             stage=args.stage,
@@ -1840,7 +1882,7 @@ def main():
             agent=args.agent,
             agent_model=args.agent_model,
             agent_timeout=args.agent_timeout,
-            require_auth=args.require_auth,
+            require_auth=resolved_require_auth,
         )
 
     elif args.command == "stop":
