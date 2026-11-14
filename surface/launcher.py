@@ -647,3 +647,29 @@ def write_command_script(project_dir: Path, force: bool = False) -> Path:
     target.write_text(script, encoding="utf-8")
     os.chmod(target, 0o755)
     return target
+
+
+def create_desktop_shortcut(command_script_path: Path, force: bool = False) -> Path:
+    """Create a one-click Desktop symlink pointing at `command_script_path`.
+
+    The symlink is placed at `~/Desktop/<basename of command_script_path>`
+    (e.g. `~/Desktop/Open Surface Board.command`). `~/Desktop` is created
+    if it doesn't already exist (uncommon, but possible under some
+    locale/configuration or CI/test environments).
+
+    Raises `FileExistsError` if the symlink target path already exists and
+    `force` is False, mirroring `write_command_script`'s existing-file
+    convention.
+    """
+    command_script_path = Path(command_script_path).resolve()
+    desktop_dir = Path.home() / "Desktop"
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+
+    link_path = desktop_dir / command_script_path.name
+    if link_path.exists() or link_path.is_symlink():
+        if not force:
+            raise FileExistsError(str(link_path))
+        link_path.unlink()
+
+    link_path.symlink_to(command_script_path)
+    return link_path

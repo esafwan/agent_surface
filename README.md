@@ -266,6 +266,7 @@ board with the saved settings, after checking that the configured agent CLI is o
 
     surface app create            # writes "Open Surface Board.command" in the project (macOS)
     surface app create --force    # overwrite an existing one
+    surface app create --desktop  # also add a one-click shortcut on your Desktop
 
 Double-clicking the `.command` file resumes the project. It locates `surface` through
 `$SURFACE_BIN`, then your login shell's `PATH`, then the path recorded when the file was

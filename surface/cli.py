@@ -1766,6 +1766,10 @@ def main():
         "--force", action="store_true",
         help="Overwrite an existing launcher script",
     )
+    app_create_parser.add_argument(
+        "--desktop", action="store_true",
+        help="Also create a one-click Desktop shortcut (symlink) to the launcher",
+    )
 
     # =========================================================================
     # Convenience Mode (SPEC section 35)
@@ -1938,6 +1942,21 @@ def main():
                 "another machine instead of copying this file). Consider adding "
                 "'Open Surface Board.command' to your .gitignore."
             )
+
+            if args.desktop:
+                from surface.launcher import create_desktop_shortcut
+
+                try:
+                    shortcut = create_desktop_shortcut(written, force=args.force)
+                except FileExistsError:
+                    print(
+                        f"Launcher created at {written}, but the Desktop shortcut "
+                        "was NOT created: a Desktop shortcut already exists at "
+                        f"~/Desktop/{written.name}; use --force to overwrite"
+                    )
+                    sys.exit(1)
+                else:
+                    print(f"Desktop shortcut created at {shortcut}")
 
     else:
         parser.print_help()
