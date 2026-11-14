@@ -54,6 +54,20 @@ def _db_path_for(project_dir: Path) -> Path:
     return project_dir / ".surface-board" / "state.sqlite3"
 
 
+def _auth_enabled(run_dir: Path) -> bool:
+    """Whether the live/just-started runtime in `run_dir` requires auth.
+
+    Basic Auth is opt-in (`--auth`/`require_auth`): `serve()` only writes
+    `run/token` when it generated one, so a missing or empty token file
+    means auth is disabled for this runtime.
+    """
+    token_path = run_dir / "token"
+    try:
+        return token_path.exists() and token_path.read_text().strip() != ""
+    except OSError:
+        return False
+
+
 def detect_live_runtime(project_dir: Path) -> Optional[str]:
     """Return the board URL if a runtime is genuinely live, else None.
 
@@ -425,8 +439,9 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
 
         if url is not None:
             print(url)
-            print("(sign in with user 'surface', password: see "
-                  f"{run_dir / 'token'}, or it will prompt you)")
+            if _auth_enabled(run_dir):
+                print("(sign in with user 'surface', password: see "
+                      f"{run_dir / 'token'}, or it will prompt you)")
             if not no_browser:
                 _open_board(url, project_dir, app_window)
 
@@ -516,6 +531,7 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
                     agent=profile.get("agent"),
                     agent_model=profile.get("agent_model"),
                     agent_timeout=profile.get("agent_timeout"),
+                    require_auth=profile.get("require_auth", False),
                 )
             except BaseException as exc:  # noqa: BLE001 - re-surfaced after join
                 serve_error.append(exc)
@@ -542,8 +558,9 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
 
         if live_url is not None:
             print(live_url)
-            print("(sign in with user 'surface', password: see "
-                  f"{run_dir / 'token'}, or it will prompt you)")
+            if _auth_enabled(run_dir):
+                print("(sign in with user 'surface', password: see "
+                      f"{run_dir / 'token'}, or it will prompt you)")
             if not no_browser:
                 _open_board(live_url, project_dir, app_window)
         else:

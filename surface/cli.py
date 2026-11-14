@@ -638,7 +638,7 @@ class SurfaceCLI:
         return build_board(store, stage_config, **kwargs)
 
     def _build_board_app(self, store: Store, stage_config: StageConfig,
-                         token: str) -> Any:
+                         token: Optional[str]) -> Any:
         """Build the FastAPI web board (the default renderer)."""
         from surface.board_web import create_app
 
@@ -650,7 +650,7 @@ class SurfaceCLI:
         )
 
     def _launch_web_board(self, stage_config: StageConfig, host: str, port: int,
-                          token: str, run_dir: Path) -> bool:
+                          token: Optional[str], run_dir: Path) -> bool:
         """Launch the hand-written FastAPI board in a daemon thread.
 
         This is the default renderer: the Gradio board's header could not
@@ -691,13 +691,19 @@ class SurfaceCLI:
         thread.start()
         self._board_thread = thread
         self._write_runtime_file(run_dir, "board.pid", str(os.getpid()))
-        logger.info(
-            f"Board listening on http://{host}:{port} (basic auth user 'surface')"
-        )
+        if token:
+            logger.info(
+                f"Board listening on http://{host}:{port} (basic auth user 'surface')"
+            )
+        else:
+            logger.info(
+                f"Board listening on http://{host}:{port} "
+                "(no authentication -- bound to 127.0.0.1 only)"
+            )
         return True
 
     def _launch_board(self, stage_config: StageConfig, host: str, port: int,
-                      token: str, run_dir: Path) -> bool:
+                      token: Optional[str], run_dir: Path) -> bool:
         """Launch the Gradio board in a daemon thread.
 
         Returns True if a board was launched, False if Gradio is unavailable.
@@ -724,11 +730,12 @@ class SurfaceCLI:
 
         def _run() -> None:
             try:
-                # SPEC section 36: bind loopback by default and require auth.
+                # SPEC section 36/37: bind loopback by default; basic auth is
+                # only applied when a token was generated (--auth).
                 blocks.launch(
                     server_name=host,
                     server_port=port,
-                    auth=("surface", token),
+                    auth=("surface", token) if token else None,
                     share=False,
                     quiet=True,
                     show_error=True,
@@ -742,7 +749,13 @@ class SurfaceCLI:
         self._board_thread = thread
         # The board runs in this process, so board.pid is our pid.
         self._write_runtime_file(run_dir, "board.pid", str(os.getpid()))
-        logger.info(f"Board listening on http://{host}:{port} (basic auth user 'surface')")
+        if token:
+            logger.info(f"Board listening on http://{host}:{port} (basic auth user 'surface')")
+        else:
+            logger.info(
+                f"Board listening on http://{host}:{port} "
+                "(no authentication -- bound to 127.0.0.1 only)"
+            )
         return True
 
     def serve(self, db: Optional[str] = None, stage: str = "movie",
@@ -763,20 +776,30 @@ class SurfaceCLI:
               renderer: str = "web",
               agent: Optional[str] = None,
               agent_model: Optional[str] = None,
-              agent_timeout: Optional[float] = None) -> None:
+              agent_timeout: Optional[float] = None,
+              require_auth: Optional[bool] = None) -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
         Architecture (single process):
-          * the board runs in a daemon thread with its own Store connection
-            and HTTP basic auth bound to loopback. `renderer="web"` (the
-            default) serves surface.board_web's FastAPI app;
-            `renderer="gradio"` serves the legacy surface.board Blocks;
+          * the board runs in a daemon thread with its own Store connection,
+            bound to loopback by default. `renderer="web"` (the default)
+            serves surface.board_web's FastAPI app; `renderer="gradio"`
+            serves the legacy surface.board Blocks;
           * the supervisor + poller cycle runs on the main thread;
           * the worker runs as a real subprocess spawned by
             NativeStreamTransport (`python -m surface.worker --db <path>`).
 
         Bounded runs (`--max-iterations` / `--run-once`) exist so tests and
         scripted use do not block; with no bound the loop runs until SIGINT.
+
+        `require_auth` (SPEC section 36/37): the real security boundary is
+        binding the board to loopback (`host="127.0.0.1"`, the default) --
+        HTTP Basic Auth is an opt-in extra layer on top of that, off by
+        default. `None` (the argparse sentinel for "--auth not passed")
+        means "use whatever the saved launch profile says, defaulting to
+        False", same "None means don't change" semantics as `agent`/
+        `agent_model`/`agent_timeout` below. Passing `True` (`--auth`)
+        always enables it for this run and persists the preference.
         """
         if db:
             self.db_path = db
@@ -822,14 +845,55 @@ class SurfaceCLI:
             project_id = json.loads(project_row[0]) if project_row else "default"
 
             # -----------------------------------------------------------------
+            # Launch profile: an explicit --agent/--agent-model/--agent-timeout
+            # flag always wins for *this* invocation and is also saved for
+            # next time; omitting a flag means "use whatever's saved", not
+            # "revert to the hardcoded default". `agent`/`agent_model`/
+            # `agent_timeout` are None here only when the corresponding flag
+            # was not passed (argparse sentinel), so merge_profile's
+            # "None means don't change" semantics apply directly. Resolved
+            # first because the token block right below needs
+            # `effective_require_auth`.
+            # -----------------------------------------------------------------
+            saved_profile = load_profile(store.conn)
+            profile_updates = {
+                "agent": agent,
+                "agent_model": agent_model,
+                "agent_timeout": agent_timeout,
+                "require_auth": require_auth,
+            }
+            merged_profile = merge_profile(saved_profile, profile_updates)
+            try:
+                save_profile(store.conn, merged_profile)
+            except LaunchProfileError as e:
+                # Don't let an unregistered/legacy agent name (e.g. a custom
+                # worker_command setup) block serve; just skip persisting.
+                logger.warning("Not persisting launch profile: %s", e)
+
+            effective_agent = merged_profile.get("agent")
+            effective_agent_model = merged_profile.get("agent_model")
+            effective_agent_timeout = merged_profile.get("agent_timeout")
+            if effective_agent_timeout is None:
+                effective_agent_timeout = DEFAULT_AGENT_TIMEOUT
+            effective_require_auth = bool(merged_profile.get("require_auth") or False)
+
+            # -----------------------------------------------------------------
             # Runtime directory: token + port + pids (SPEC section 9)
             # -----------------------------------------------------------------
-            # SPEC section 36: Phase 0 must prove one authenticated remote path.
-            # The board is served over HTTP basic auth with an unpredictable
-            # per-run token as the password; the token never appears in a URL.
-            token = secrets.token_urlsafe(32)
+            # SPEC section 36/37: the board binds loopback by default, which
+            # is the real security boundary for a single-machine dev tool.
+            # HTTP Basic Auth with an unpredictable per-run token is an
+            # opt-in extra layer (`--auth`) on top of that, not the default;
+            # the token never appears in a URL. When auth is disabled we
+            # neither generate nor write a token file, so nothing downstream
+            # (board_web, launcher's auth hint) can mistake "no auth" for a
+            # real-looking empty credential.
+            token: Optional[str] = (
+                secrets.token_urlsafe(32) if effective_require_auth else None
+            )
             resolved_port = self._reserve_port(host, port)
-            self._write_runtime_file(run_dir, "token", token, secret=True)
+            if token is not None:
+                self._write_runtime_file(run_dir, "token", token, secret=True)
             self._write_runtime_file(run_dir, "port", str(resolved_port))
             self._write_runtime_file(run_dir, "supervisor.pid", str(os.getpid()))
             self._write_runtime_file(run_dir, "poller.pid", str(os.getpid()))
@@ -848,35 +912,6 @@ class SurfaceCLI:
                 "video_default": MockVideoProvider(),
             }
             poller = Poller(store, providers)
-
-            # -----------------------------------------------------------------
-            # Launch profile: an explicit --agent/--agent-model/--agent-timeout
-            # flag always wins for *this* invocation and is also saved for
-            # next time; omitting a flag means "use whatever's saved", not
-            # "revert to the hardcoded default". `agent`/`agent_model`/
-            # `agent_timeout` are None here only when the corresponding flag
-            # was not passed (argparse sentinel), so merge_profile's
-            # "None means don't change" semantics apply directly.
-            # -----------------------------------------------------------------
-            saved_profile = load_profile(store.conn)
-            profile_updates = {
-                "agent": agent,
-                "agent_model": agent_model,
-                "agent_timeout": agent_timeout,
-            }
-            merged_profile = merge_profile(saved_profile, profile_updates)
-            try:
-                save_profile(store.conn, merged_profile)
-            except LaunchProfileError as e:
-                # Don't let an unregistered/legacy agent name (e.g. a custom
-                # worker_command setup) block serve; just skip persisting.
-                logger.warning("Not persisting launch profile: %s", e)
-
-            effective_agent = merged_profile.get("agent")
-            effective_agent_model = merged_profile.get("agent_model")
-            effective_agent_timeout = merged_profile.get("agent_timeout")
-            if effective_agent_timeout is None:
-                effective_agent_timeout = DEFAULT_AGENT_TIMEOUT
 
             # -----------------------------------------------------------------
             # Supervisor over a real worker subprocess
@@ -1614,6 +1649,13 @@ def main():
         help="Agent turn timeout in seconds (default: 120, or the saved "
              "launch profile value if one exists)",
     )
+    serve_parser.add_argument(
+        "--auth", dest="require_auth", action="store_true", default=None,
+        help="Require HTTP Basic Auth with a per-run token, on top of the "
+             "loopback bind (default: off -- loopback bind is the real "
+             "security boundary; omitting this flag keeps whatever the "
+             "saved launch profile says, defaulting to off)",
+    )
 
     # =========================================================================
     # Recovery CLI (SPEC section 45, 40)
@@ -1798,6 +1840,7 @@ def main():
             agent=args.agent,
             agent_model=args.agent_model,
             agent_timeout=args.agent_timeout,
+            require_auth=args.require_auth,
         )
 
     elif args.command == "stop":

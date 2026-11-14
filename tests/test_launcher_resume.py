@@ -501,6 +501,162 @@ class TestResume:
             sock.close()
 
 
+class TestResumeAuthHint:
+    """`resume()`'s printed auth hint is conditional on auth actually being
+    enabled for the runtime (SPEC section 36/37): basic auth is now opt-in,
+    so the default must not print a stale 'sign in with user surface' hint
+    for a board that has no credentials at all.
+    """
+
+    def test_reattach_no_hint_when_auth_disabled(self, tmp_path, monkeypatch, capsys):
+        run_dir = tmp_path / ".surface-board" / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        try:
+            # token="" -- serve() with the no-auth default never writes a
+            # real token, same observable shape.
+            _write_runtime_files(run_dir, port=port, pid=12345, token="")
+            monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+            monkeypatch.setattr("webbrowser.open", lambda url: True)
+
+            def _fail_serve(*args, **kwargs):
+                raise AssertionError("serve() should not be invoked on a live runtime")
+
+            monkeypatch.setattr(SurfaceCLI, "serve", _fail_serve)
+
+            code = resume(tmp_path, no_browser=True)
+            assert code == 0
+            captured = capsys.readouterr()
+            assert f"http://127.0.0.1:{port}/" in captured.out
+            assert "sign in with user" not in captured.out
+        finally:
+            sock.close()
+
+    def test_reattach_hint_when_auth_enabled(self, tmp_path, monkeypatch, capsys):
+        run_dir = tmp_path / ".surface-board" / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        try:
+            _write_runtime_files(run_dir, port=port, pid=12345, token="tok123")
+            monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+            monkeypatch.setattr("webbrowser.open", lambda url: True)
+
+            def _fail_serve(*args, **kwargs):
+                raise AssertionError("serve() should not be invoked on a live runtime")
+
+            monkeypatch.setattr(SurfaceCLI, "serve", _fail_serve)
+
+            code = resume(tmp_path, no_browser=True)
+            assert code == 0
+            captured = capsys.readouterr()
+            assert f"http://127.0.0.1:{port}/" in captured.out
+            assert "sign in with user 'surface'" in captured.out
+        finally:
+            sock.close()
+
+    def test_fresh_start_no_hint_when_auth_disabled(self, tmp_path, monkeypatch, capsys):
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+            "require_auth": False,
+        })
+        store.conn.close()
+
+        run_dir = db_path.parent / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr("webbrowser.open", lambda url: True)
+
+        captured_serve_kwargs = {}
+
+        def _fake_serve(self, **kwargs):
+            captured_serve_kwargs.update(kwargs)
+            # No-auth default: serve() writes no token file at all.
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "port").write_text(str(port))
+            (run_dir / "board.pid").write_text(str(os.getpid()))
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        try:
+            code = resume(tmp_path, no_browser=True, _poll_timeout=5.0)
+            assert code == 0
+            captured = capsys.readouterr()
+            assert f"http://127.0.0.1:{port}/" in captured.out
+            assert "sign in with user" not in captured.out
+            assert captured_serve_kwargs.get("require_auth") is False
+        finally:
+            sock.close()
+
+    def test_fresh_start_passes_require_auth_true_from_profile(self, tmp_path, monkeypatch, capsys):
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+            "require_auth": True,
+        })
+        store.conn.close()
+
+        run_dir = db_path.parent / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr("webbrowser.open", lambda url: True)
+
+        captured_serve_kwargs = {}
+
+        def _fake_serve(self, **kwargs):
+            captured_serve_kwargs.update(kwargs)
+            _write_runtime_files(run_dir, port=port, pid=os.getpid(), token="tok123")
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        try:
+            code = resume(tmp_path, no_browser=True, _poll_timeout=5.0)
+            assert code == 0
+            captured = capsys.readouterr()
+            assert "sign in with user 'surface'" in captured.out
+            assert captured_serve_kwargs.get("require_auth") is True
+        finally:
+            sock.close()
+
+
 class TestFindChromiumBinary:
     def test_detection_order_respected(self, monkeypatch, tmp_path):
         chrome_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")

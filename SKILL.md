@@ -121,12 +121,15 @@ This launches:
 3. **Poller** — polls generation jobs and emits completions
 4. **Board** — the web renderer by default (`surface/board_web.py`, FastAPI + hand-written HTML/CSS/JS); `--renderer gradio` selects the legacy Gradio board. Either logs and runs headless if its dependency is missing.
 
-By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`) with an auto-generated token written to `<db dir>/run/token`; pass `--no-board` to run supervisor+poller only.
+By default the supervisor+poller loop runs **unbounded**, until interrupted with Ctrl-C (SIGINT triggers a clean shutdown: worker stopped, transport closed, runtime files removed). For scripted/testable runs, bound it with `--max-iterations N` (`--supervisor-iterations` is a legacy alias). The board launches on loopback (`127.0.0.1` by default; override with `--host`/`--port`); pass `--no-board` to run supervisor+poller only.
 
-The token is the password for HTTP **basic auth**, not a bearer token: log in
-with username `surface` and the token as the password. Note the token lives
-beside the **db**, so with `--db examples/x/state.sqlite3` it is at
-`examples/x/run/token`, not `.surface-board/run/token`.
+Loopback-only is the real security boundary for this single-machine dev tool. HTTP **basic auth**
+is an opt-in extra layer, off by default: pass `--auth` to also require it. With `--auth`, a
+random per-run token is written to `<db dir>/run/token` and becomes the password for basic auth
+(log in with username `surface`, the token as the password — it's a password, not a bearer
+token). Note the token lives beside the **db**, so with `--db examples/x/state.sqlite3` it is at
+`examples/x/run/token`, not `.surface-board/run/token`. Without `--auth`, no token file is
+written at all. `surface resume` remembers the last `--auth` choice via the saved launch profile.
 
 ### Check Project Status
 

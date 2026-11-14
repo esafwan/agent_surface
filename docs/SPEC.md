@@ -375,8 +375,16 @@ Agent MAY wait again later.
 No design may depend on a shell command blocking for human-scale durations.
 ## 36. Remote Access
 Remote browser use is core.
-Phase 0 MUST prove one authenticated remote path.
-Board SHOULD bind loopback by default.
+Board MUST bind loopback (`127.0.0.1`) by default; this loopback bind is the
+real security boundary for a single-machine dev tool, not HTTP Basic Auth.
+HTTP Basic Auth with a per-run unpredictable token is an OPT-IN extra layer
+(CLI `--auth`), OFF by default, on `serve`/`resume` and the generated
+`.command` launcher. Phase 0 proved the authenticated remote path once
+(token entropy, loopback bind, restrictive token-file permissions); that
+mechanism still exists and is still tested, it is simply no longer forced on
+by default. When auth is disabled, `run/token` is not written at all (no
+fake/empty credential file), and `resume`'s printed auth hint is likewise
+suppressed.
 Remote access SHOULD use a self-controlled tunnel for sensitive/client work or a renderer-provided share mechanism when acceptable.
 Reusable bearer tokens MUST NOT remain exposed in URL history.
 A bootstrap token MAY exchange for short-lived session/cookie auth.

@@ -34,7 +34,7 @@ Requires Python 3.10+.
 ```bash
 pip install -e ".[board]"          # the `surface` command + the web board (FastAPI, uvicorn)
 surface init --stage poem          # creates .surface-board/state.sqlite3
-surface serve                      # prints http://127.0.0.1:<port>/?token=... and runs until Ctrl-C
+surface serve                      # prints http://127.0.0.1:<port>/ and runs until Ctrl-C
 ```
 
 Open the printed URL. You'll see one card holding the poem's current text, its status, and the
@@ -204,6 +204,7 @@ surface [--db PATH] serve [--run-once] [--max-iterations N] [--no-board]
                           [--keep-runtime-files] [--pool-size N]
                           [--recycle-after-events N] [--recycle-after-tokens N]
                           [--agent NAME] [--agent-model ID] [--agent-timeout SECONDS]
+                          [--auth]
 surface [--db PATH] stop
 surface [--db PATH] interrupt
 surface [--db PATH] recover [--force-reclaim]
@@ -232,9 +233,12 @@ surface [--db PATH] project summary
 
 By default `serve` runs until Ctrl-C. Use `--run-once` or `--max-iterations N` to bound it, for
 example `surface serve --no-board --max-iterations 5` for headless scripting. The board binds to
-`127.0.0.1` (change it with `--host`/`--port`). Each run gets a random auth token, written under
-the runtime dir (`--runtime-dir`), so there's never a fixed or guessable credential. If
-fastapi/uvicorn aren't installed, `serve` logs that and runs headless.
+`127.0.0.1` (change it with `--host`/`--port`), which is the real security boundary for this
+single-machine dev tool. HTTP Basic Auth is an opt-in extra layer on top of that: pass `--auth`
+to also require it, in which case each run gets a random auth token, written under the runtime
+dir (`--runtime-dir`), so there's never a fixed or guessable credential. Without `--auth` (the
+default), no token is generated or written at all. If fastapi/uvicorn aren't installed, `serve`
+logs that and runs headless.
 
 ## Resuming a project (in progress)
 

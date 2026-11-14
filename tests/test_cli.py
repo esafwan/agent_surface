@@ -602,6 +602,7 @@ class TestServeRuntime:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -639,6 +640,7 @@ class TestServeRuntime:
                 board=False,
                 worker_command=ECHO_WORKER_COMMAND,
                 keep_runtime_files=True,
+                require_auth=True,
             )
             capsys.readouterr()
             tokens.add(cli.runtime_info["token"])
@@ -671,6 +673,7 @@ class TestServeRuntime:
             worker_command=ECHO_WORKER_COMMAND,
             runtime_dir=str(custom),
             keep_runtime_files=True,
+            require_auth=True,
         )
         output = json.loads(capsys.readouterr().out)
 
@@ -797,6 +800,7 @@ class TestServeRuntime:
             renderer="gradio",
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         output = json.loads(capsys.readouterr().out)
 
@@ -804,12 +808,134 @@ class TestServeRuntime:
         assert output["board"] == "running"
         assert launched["server_name"] == "127.0.0.1"
         assert launched["share"] is False
-        # SPEC section 36: authenticated, with the runtime token as credential.
+        # SPEC section 36: with --auth, authenticated with the runtime token.
         assert launched["auth"] == ("surface", cli.runtime_info["token"])
         assert launched["server_port"] == cli.runtime_info["port"]
 
         run_dir = Path(db_path).resolve().parent / "run"
         assert (run_dir / "board.pid").read_text() == str(os.getpid())
+
+    def test_serve_no_auth_by_default(self, serve_project, capsys):
+        """SPEC section 36/37 (new default): no --auth means no token at
+        all, not merely a fixed/empty one -- loopback bind is the real
+        security boundary."""
+        cli, db_path = serve_project
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+        )
+        capsys.readouterr()
+
+        run_dir = Path(db_path).resolve().parent / "run"
+        assert not (run_dir / "token").exists()
+        assert cli.runtime_info["token"] is None
+
+    def test_serve_auth_flag_restores_old_behavior(self, serve_project, capsys):
+        """`--auth` (require_auth=True) is unchanged from the old default:
+        a real per-run token is generated and written."""
+        cli, db_path = serve_project
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+            require_auth=True,
+        )
+        capsys.readouterr()
+
+        run_dir = Path(db_path).resolve().parent / "run"
+        token_file = run_dir / "token"
+        assert token_file.exists()
+        token = token_file.read_text()
+        assert len(token) >= 40
+        assert cli.runtime_info["token"] == token
+
+    def test_serve_no_auth_board_reachable_without_credentials(
+        self, serve_project, monkeypatch, capsys
+    ):
+        """With the no-auth default, the web board's app is built with
+        token=None, so requests need no Authorization header at all."""
+        pytest.importorskip("fastapi")
+        cli, db_path = serve_project
+
+        from fastapi.testclient import TestClient
+
+        built = {}
+
+        def _fake_app(store, cfg, token):
+            built["token"] = token
+            from surface.board_web import create_app
+            return create_app(store, cfg, token=token)
+
+        monkeypatch.setattr(cli, "_build_board_app", _fake_app)
+        launched = {}
+        monkeypatch.setattr(
+            "uvicorn.run", lambda app, **kwargs: launched.setdefault("app", app)
+        )
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+        )
+        capsys.readouterr()
+
+        assert built["token"] is None
+        client = TestClient(launched["app"])
+        assert client.get("/api/state").status_code == 200
+
+    def test_serve_auth_flag_board_requires_credentials(
+        self, serve_project, monkeypatch, capsys
+    ):
+        """With `--auth`, the web board's app is built with a real token,
+        so an unauthenticated request is rejected."""
+        pytest.importorskip("fastapi")
+        cli, db_path = serve_project
+
+        from fastapi.testclient import TestClient
+
+        built = {}
+
+        def _fake_app(store, cfg, token):
+            built["token"] = token
+            from surface.board_web import create_app
+            return create_app(store, cfg, token=token)
+
+        monkeypatch.setattr(cli, "_build_board_app", _fake_app)
+        launched = {}
+        monkeypatch.setattr(
+            "uvicorn.run", lambda app, **kwargs: launched.setdefault("app", app)
+        )
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=True,
+            worker_command=ECHO_WORKER_COMMAND,
+            keep_runtime_files=True,
+            require_auth=True,
+        )
+        capsys.readouterr()
+
+        assert built["token"]
+        client = TestClient(launched["app"])
+        assert client.get("/api/state").status_code == 401
+
+        import base64
+        header = "Basic " + base64.b64encode(
+            f"surface:{built['token']}".encode()
+        ).decode()
+        assert client.get(
+            "/api/state", headers={"Authorization": header}
+        ).status_code == 200
 
     def test_serve_max_iterations_bounds_the_loop(self, serve_project, capsys):
         cli, db_path = serve_project

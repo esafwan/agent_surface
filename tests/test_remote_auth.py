@@ -105,6 +105,7 @@ class TestBoardAuthCredentialMatching:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -121,6 +122,7 @@ class TestBoardAuthCredentialMatching:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -141,6 +143,7 @@ class TestBoardAuthCredentialMatching:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -160,6 +163,7 @@ class TestBoardAuthCredentialMatching:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -190,6 +194,7 @@ class TestBoardBindsLoopbackNotWildcard:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -219,6 +224,7 @@ class TestBoardBindsLoopbackNotWildcard:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
         assert cli.runtime_info["host"] != "0.0.0.0"
@@ -236,6 +242,7 @@ class TestTokenFilePermissions:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -255,6 +262,7 @@ class TestTokenFilePermissions:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 
@@ -275,6 +283,7 @@ class TestTokenNeverAppearsInPredictableSurfaces:
             board=False,
             worker_command=ECHO_WORKER_COMMAND,
             keep_runtime_files=True,
+            require_auth=True,
         )
         capsys.readouterr()
 

@@ -28,6 +28,7 @@ DEFAULTS: dict = {
     "interactive": False,
     "resume_context": True,
     "schema": None,
+    "require_auth": False,
 }
 
 
@@ -106,5 +107,9 @@ def validate_profile(p: dict) -> dict:
     if timeout is not None:
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise LaunchProfileError(f"'agent_timeout' must be a positive int or None, got {timeout!r}")
+
+    require_auth = p.get("require_auth")
+    if require_auth is not None and not isinstance(require_auth, bool):
+        raise LaunchProfileError(f"'require_auth' must be a bool or None, got {type(require_auth).__name__}")
 
     return dict(p)

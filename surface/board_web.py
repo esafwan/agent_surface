@@ -438,7 +438,9 @@ def check_basic_auth(header: Optional[str], token: Optional[str]) -> bool:
     Same credential shape the Gradio board used -- user "surface", password
     = the token in `.surface-board/run/token` -- so nothing downstream of
     the renderer has to change. `token=None` means auth is disabled, which
-    only happens in tests and in explicitly unauthenticated local runs.
+    is now the CLI's default (`surface serve`/`resume` without `--auth`):
+    the real security boundary is binding the board to loopback only, and
+    Basic Auth is an opt-in extra layer on top of that.
     """
     if not token:
         return True
