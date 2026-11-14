@@ -20,6 +20,8 @@ def test_render_command_script_substitutes_fallback_and_preserves_shell_syntax()
     assert "$BIN" in script
     # No leftover doubled-dollar artifacts from the template.
     assert "$$" not in script
+    # The generated launcher defaults to the chromeless app-window experience.
+    assert "resume . --app-window" in script
 
 
 def test_rendered_script_has_valid_shell_syntax(tmp_path):

@@ -12,4 +12,4 @@ if [ -z "$$BIN" ] || [ ! -x "$$BIN" ]; then
   read -r -p "Press Enter to close this window..."
   exit 1
 fi
-"$$BIN" resume . || { echo "surface resume failed (exit $$?)"; read -r -p "Press Enter to close this window..."; exit 1; }
+"$$BIN" resume . --app-window || { echo "surface resume failed (exit $$?)"; read -r -p "Press Enter to close this window..."; exit 1; }

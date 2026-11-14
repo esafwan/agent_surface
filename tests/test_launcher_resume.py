@@ -679,15 +679,48 @@ class TestFindChromiumBinary:
         assert checked.index(str(chrome_path)) < checked.index(str(brave_path))
         assert checked.index(str(edge_path)) < checked.index(str(brave_path))
 
-    def test_falls_back_to_shutil_which(self, monkeypatch):
-        monkeypatch.setattr(os.path, "exists", lambda path: False)
+    def test_helium_found_after_chromium_before_which_fallback(self, monkeypatch):
+        chrome_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        edge_path = Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+        brave_path = Path("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
+        chromium_path = Path("/Applications/Chromium.app/Contents/MacOS/Chromium")
+        helium_path = Path("/Applications/Helium.app/Contents/MacOS/Helium")
+        checked = []
+
+        def _fake_exists(path):
+            checked.append(str(path))
+            return str(path) == str(helium_path)
+
+        monkeypatch.setattr(os.path, "exists", _fake_exists)
+
+        which_calls = []
 
         def _fake_which(name):
-            return "/usr/bin/chromium-browser" if name == "chromium-browser" else None
+            which_calls.append(name)
+            return None
 
         monkeypatch.setattr(shutil, "which", _fake_which)
 
-        assert find_chromium_binary() == "/usr/bin/chromium-browser"
+        result = find_chromium_binary()
+        assert result == str(helium_path)
+        for earlier in (chrome_path, edge_path, brave_path, chromium_path):
+            assert str(earlier) in checked
+            assert checked.index(str(earlier)) < checked.index(str(helium_path))
+        # shutil.which fallback should never have been reached.
+        assert which_calls == []
+
+    def test_falls_back_to_shutil_which(self, monkeypatch):
+        monkeypatch.setattr(os.path, "exists", lambda path: False)
+        which_calls = []
+
+        def _fake_which(name):
+            which_calls.append(name)
+            return "/usr/bin/helium" if name == "helium" else None
+
+        monkeypatch.setattr(shutil, "which", _fake_which)
+
+        assert find_chromium_binary() == "/usr/bin/helium"
+        assert which_calls == ["google-chrome", "chromium", "chromium-browser", "helium"]
 
     def test_returns_none_when_nothing_found(self, monkeypatch):
         monkeypatch.setattr(os.path, "exists", lambda path: False)

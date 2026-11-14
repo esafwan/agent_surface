@@ -300,6 +300,7 @@ def find_chromium_binary() -> Optional[str]:
         "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         "Brave Browser.app/Contents/MacOS/Brave Browser",
         "Chromium.app/Contents/MacOS/Chromium",
+        "Helium.app/Contents/MacOS/Helium",
     ]
     for rel in candidates:
         for base in (Path("/Applications"), Path.home() / "Applications"):
@@ -307,7 +308,7 @@ def find_chromium_binary() -> Optional[str]:
             if os.path.exists(path):
                 return str(path)
 
-    for name in ("google-chrome", "chromium", "chromium-browser"):
+    for name in ("google-chrome", "chromium", "chromium-browser", "helium"):
         which = shutil.which(name)
         if which:
             return which
