@@ -29,6 +29,7 @@ DEFAULTS: dict = {
     "resume_context": True,
     "schema": None,
     "require_auth": False,
+    "entry_path": None,
 }
 
 
@@ -111,5 +112,15 @@ def validate_profile(p: dict) -> dict:
     require_auth = p.get("require_auth")
     if require_auth is not None and not isinstance(require_auth, bool):
         raise LaunchProfileError(f"'require_auth' must be a bool or None, got {type(require_auth).__name__}")
+
+    entry_path = p.get("entry_path")
+    if entry_path is not None:
+        if not isinstance(entry_path, str):
+            raise LaunchProfileError(f"'entry_path' must be a string starting with '/', got {type(entry_path).__name__}")
+        if (not entry_path.startswith("/")) or entry_path.startswith("//") or "://" in entry_path:
+            raise LaunchProfileError(
+                f"'entry_path' must be a site-relative path starting with a single '/' "
+                f"(e.g. '/static/haiku.html'), got {entry_path!r}"
+            )
 
     return dict(p)

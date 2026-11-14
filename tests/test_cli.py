@@ -1898,3 +1898,34 @@ class TestServeNoAuthFlag:
         store = cli.get_store()
         saved = load_profile(store.conn)
         assert saved.get("require_auth") is False
+
+    def test_entry_path_flag_persists_to_profile(self, serve_project, capsys):
+        """`surface serve --entry-path /static/haiku.html` saves it, and a
+        later plain `serve` (no flag) does not reset it back to None."""
+        cli, db_path = serve_project
+
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+            entry_path="/static/haiku.html",
+        )
+        capsys.readouterr()
+
+        from surface.launch_profile import load_profile
+        store = cli.get_store()
+        saved = load_profile(store.conn)
+        assert saved.get("entry_path") == "/static/haiku.html"
+
+        # Separate invocation, no --entry-path flag: must not reset it.
+        cli.serve(
+            db=db_path,
+            max_iterations=1,
+            board=False,
+            worker_command=ECHO_WORKER_COMMAND,
+        )
+        capsys.readouterr()
+
+        saved = load_profile(cli.get_store().conn)
+        assert saved.get("entry_path") == "/static/haiku.html"

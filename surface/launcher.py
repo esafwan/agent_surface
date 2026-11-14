@@ -359,6 +359,22 @@ def open_app_window(url: str, project_dir: Path) -> bool:
     return True
 
 
+def _apply_entry_path(url: str, profile: Optional[dict]) -> str:
+    """Append the profile's `entry_path` to `url`'s origin, if set.
+
+    `url` is the bare board origin (e.g. `http://127.0.0.1:1234/`) as
+    returned by `detect_live_runtime`. When the profile has no
+    `entry_path` (the common case), `url` is returned unchanged.
+    """
+    if not profile:
+        return url
+    entry_path = profile.get("entry_path")
+    if not entry_path:
+        return url
+    origin = url.rstrip("/")
+    return f"{origin}{entry_path}"
+
+
 def _open_board(url: str, project_dir: Path, app_window: bool) -> None:
     """Open the board, preferring a chromeless app window when requested.
 
@@ -441,23 +457,31 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
             url = detect_live_runtime(project_dir)
 
         if url is not None:
-            print(url)
-            if _auth_enabled(run_dir):
-                print("(sign in with user 'surface', password: see "
-                      f"{run_dir / 'token'}, or it will prompt you)")
-            if not no_browser:
-                _open_board(url, project_dir, app_window)
-
+            reattach_profile: Optional[dict] = None
             if db_path.exists():
                 reattach_store = Store(str(db_path))
                 try:
                     reattach_profile = load_profile(reattach_store.conn)
                     if reattach_profile is None:
                         reattach_profile = _fallback_profile_from_stage_config(reattach_store)
+                    full_url = _apply_entry_path(url, reattach_profile)
+                    print(full_url)
+                    if _auth_enabled(run_dir):
+                        print("(sign in with user 'surface', password: see "
+                              f"{run_dir / 'token'}, or it will prompt you)")
+                    if not no_browser:
+                        _open_board(full_url, project_dir, app_window)
                     _agent_handoff(project_dir, reattach_profile, with_agent,
                                     conn=reattach_store.conn)
                 finally:
                     reattach_store.conn.close()
+            else:
+                print(url)
+                if _auth_enabled(run_dir):
+                    print("(sign in with user 'surface', password: see "
+                          f"{run_dir / 'token'}, or it will prompt you)")
+                if not no_browser:
+                    _open_board(url, project_dir, app_window)
             return 0
 
         if not acquired:
@@ -560,12 +584,13 @@ def resume(project_dir: Path, no_browser: bool = False, with_agent: bool = False
             time.sleep(0.2)
 
         if live_url is not None:
-            print(live_url)
+            full_live_url = _apply_entry_path(live_url, profile)
+            print(full_live_url)
             if _auth_enabled(run_dir):
                 print("(sign in with user 'surface', password: see "
                       f"{run_dir / 'token'}, or it will prompt you)")
             if not no_browser:
-                _open_board(live_url, project_dir, app_window)
+                _open_board(full_live_url, project_dir, app_window)
         else:
             print(
                 f"board did not come up within {_poll_timeout}s; check the "

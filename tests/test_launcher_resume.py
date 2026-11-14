@@ -500,6 +500,109 @@ class TestResume:
         finally:
             sock.close()
 
+    def test_entry_path_appended_on_reattach(self, tmp_path, monkeypatch):
+        """A profile with `entry_path` set makes resume open that path on
+        reattach, not the bare board root."""
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+            "require_auth": False,
+            "entry_path": "/static/haiku.html",
+        })
+        store.conn.close()
+
+        run_dir = db_path.parent / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        try:
+            _write_runtime_files(run_dir, port=port, pid=12345, token="")
+            monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+
+            captured = {}
+
+            def _fake_open_board(url, project_dir, app_window):
+                captured["url"] = url
+
+            monkeypatch.setattr("surface.launcher._open_board", _fake_open_board)
+
+            def _fail_serve(*args, **kwargs):
+                raise AssertionError("serve() should not be invoked on a live runtime")
+
+            monkeypatch.setattr(SurfaceCLI, "serve", _fail_serve)
+
+            code = resume(tmp_path)
+            assert code == 0
+            assert captured["url"] == f"http://127.0.0.1:{port}/static/haiku.html"
+        finally:
+            sock.close()
+
+    def test_entry_path_appended_on_fresh_start(self, tmp_path, monkeypatch):
+        """A profile with `entry_path` set makes resume open that path when
+        starting the board fresh, not the bare board root."""
+        db_path = tmp_path / ".surface-board" / "state.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        store.conn.execute(
+            "INSERT OR REPLACE INTO kv_state (key, value_json) VALUES (?, ?)",
+            ("stage_config", json.dumps({"id": "movie"})),
+        )
+        store.conn.commit()
+        save_profile(store.conn, {
+            "version": 1,
+            "agent": "fake",
+            "agent_model": None,
+            "agent_timeout": None,
+            "stage": "movie",
+            "interactive": False,
+            "resume_context": True,
+            "schema": None,
+            "require_auth": False,
+            "entry_path": "/static/haiku.html",
+        })
+        store.conn.close()
+
+        run_dir = db_path.parent / "run"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+
+        captured = {}
+
+        def _fake_open_board(url, project_dir, app_window):
+            captured["url"] = url
+
+        monkeypatch.setattr("surface.launcher._open_board", _fake_open_board)
+
+        def _fake_serve(self, **kwargs):
+            _write_runtime_files(run_dir, port=port, pid=os.getpid(), token="")
+
+        monkeypatch.setattr(SurfaceCLI, "serve", _fake_serve)
+
+        try:
+            code = resume(tmp_path, _poll_timeout=5.0)
+            assert code == 0
+            assert captured["url"] == f"http://127.0.0.1:{port}/static/haiku.html"
+        finally:
+            sock.close()
+
 
 class TestResumeAuthHint:
     """`resume()`'s printed auth hint is conditional on auth actually being

@@ -778,7 +778,8 @@ class SurfaceCLI:
               agent: Optional[str] = None,
               agent_model: Optional[str] = None,
               agent_timeout: Optional[float] = None,
-              require_auth: Optional[bool] = None) -> None:
+              require_auth: Optional[bool] = None,
+              entry_path: Optional[str] = None) -> None:
         """Start the board runtime: store, supervisor, poller, and board.
 
         Architecture (single process):
@@ -862,6 +863,7 @@ class SurfaceCLI:
                 "agent_model": agent_model,
                 "agent_timeout": agent_timeout,
                 "require_auth": require_auth,
+                "entry_path": entry_path,
             }
             merged_profile = merge_profile(saved_profile, profile_updates)
             try:
@@ -1692,6 +1694,14 @@ def main():
              "non-loopback --host still forces auth on regardless of this "
              "flag.",
     )
+    serve_parser.add_argument(
+        "--entry-path", type=str, default=None,
+        help="Site-relative path 'surface resume'/'surface app create' should "
+             "open instead of the generic board root (e.g. '/static/haiku.html'), "
+             "for projects with a bespoke custom UI. Default: None = open the "
+             "board root as before. Omitting this flag keeps whatever the "
+             "saved launch profile says.",
+    )
 
     # =========================================================================
     # Recovery CLI (SPEC section 45, 40)
@@ -1887,6 +1897,7 @@ def main():
             agent_model=args.agent_model,
             agent_timeout=args.agent_timeout,
             require_auth=resolved_require_auth,
+            entry_path=args.entry_path,
         )
 
     elif args.command == "stop":

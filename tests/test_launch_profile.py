@@ -89,6 +89,23 @@ def test_save_rejects_invalid_and_leaves_no_row(conn):
     assert load_profile(conn) is None
 
 
+def test_accept_valid_entry_path():
+    validate_profile(dict(DEFAULTS, entry_path="/static/haiku.html"))
+    validate_profile(dict(DEFAULTS, entry_path="/some/path?query=1"))
+    validate_profile(dict(DEFAULTS, entry_path=None))
+
+
+@pytest.mark.parametrize("bad", [
+    "static/haiku.html",  # missing leading slash
+    "http://example.com/static/haiku.html",  # full URL with scheme
+    "https://example.com/x",
+    "//evil.com/static/haiku.html",  # protocol-relative
+])
+def test_reject_invalid_entry_path(bad):
+    with pytest.raises(LaunchProfileError, match="entry_path"):
+        validate_profile(dict(DEFAULTS, entry_path=bad))
+
+
 def test_load_does_not_validate(conn):
     # A profile referencing a removed backend must still load.
     conn.execute(
